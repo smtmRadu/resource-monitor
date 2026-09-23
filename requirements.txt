@@ -1,0 +1,5 @@
+psutil>=5.9
+pystray>=0.19
+pillow>=10
+pywin32>=300
+# Phase 2: pythonnet (LibreHardwareMonitorLib) + PresentMon for FPS

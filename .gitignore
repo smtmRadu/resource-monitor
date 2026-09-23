@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+vendor/lhm.json
+vendor/lhm.json.tmp
+vendor/PresentMon/pm.csv
+clickthrough.log
