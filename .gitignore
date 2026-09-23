@@ -1,6 +1,7 @@
 __pycache__/
 *.pyc
 *.log
+TODOS.md
 vendor/lhm.json
 vendor/lhm.json.tmp
 vendor/PresentMon/pm.csv
