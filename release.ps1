@@ -24,7 +24,8 @@ $files = @(
 )
 # Sensor helpers; debug symbols and API docs are not needed at runtime.
 $files += Get-ChildItem vendor\PresentMon, vendor\LHM -Recurse -File |
-    Where-Object { $_.Extension -notin '.pdb', '.xml' } |
+    # LibreHardwareMonitor.config: LHM rewrites it at runtime, so its hash never matches.
+    Where-Object { $_.Extension -notin '.pdb', '.xml' -and $_.Name -ne 'LibreHardwareMonitor.config' } |
     ForEach-Object {
         $rel = $_.FullName.Substring($PSScriptRoot.Length + 1).Replace('\', '/')
         Entry $rel $rel

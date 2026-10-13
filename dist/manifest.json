@@ -42,11 +42,6 @@
                       "sha256":  "d86690efde30ea9179f669320f39148853793b743a98b531afeaf30598e22f54"
                   },
                   {
-                      "path":  "vendor/LHM/LibreHardwareMonitor.config",
-                      "src":  "vendor/LHM/LibreHardwareMonitor.config",
-                      "sha256":  "404e222c12b36bba3e1979514ac5c303cc26f724be5876c3f861f2f4c5c64dd2"
-                  },
-                  {
                       "path":  "vendor/LHM/LibreHardwareMonitor.exe",
                       "src":  "vendor/LHM/LibreHardwareMonitor.exe",
                       "sha256":  "fe216a48a48a6048156a133a39b960437d781a4c9214e5abc0f26f666f61ba22"
@@ -54,7 +49,7 @@
                   {
                       "path":  "vendor/LHM/LibreHardwareMonitor.exe.config",
                       "src":  "vendor/LHM/LibreHardwareMonitor.exe.config",
-                      "sha256":  "523c8c67b67a68d9a51d2339b64bff1e04f65b2ef39a895cc0fe260b46e48778"
+                      "sha256":  "29c7a5ba8d2fe2191171e7ba66e8832c6728fe8ac1b7d8c68413db2348beb44a"
                   },
                   {
                       "path":  "vendor/LHM/LibreHardwareMonitorLib.dll",
