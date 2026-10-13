@@ -21,8 +21,14 @@ const ROW_H: f32 = 36.0;
 const TRACK_H: f32 = 60.0;
 const WIDTH: f32 = ICON_W + 2.0 * MARGIN + GAP + VAL_W; // 258
 const HIST: usize = 60;
+const DEV_H: f32 = 20.0;
+const ROW_ANIM_S: f32 = 0.3; // row collapse / expand duration
+const SAMPLE_S: f32 = 1.0; // metrics period: one ribbon step
+const FADE_S: f32 = 0.3; // old -> new values crossfade after each sample
+const LINES_FPS: f32 = 30.0; // ribbon scroll redraw rate (slow motion; more buys nothing) // "developer mode" line under the rows (dev builds)
 /// Ribbon grid lines and the contours drawn in the same color.
 const GRID: u32 = 0x232833;
+const TRACK_LBL: u32 = 0x5c6370; // ribbon captions (model names, Hz): quieter than MUTED
 /// Explorer's "low space" rule: red bar once a drive is over 90% full.
 const LOW_SPACE_USED: f32 = 0.90;
 const BG_NORMAL: f32 = 1.0;
@@ -93,6 +99,10 @@ struct Values {
     net_up: String,
     fps_name: String,
     fps_val: String,
+    /// FPS above the game monitor's refresh rate (not v-synced): yellow value.
+    fps_over: bool,
+    /// Game monitor refresh rate: the FPS ribbon's full scale.
+    fps_hz: u32,
 }
 
 pub struct Ui {
@@ -107,8 +117,32 @@ pub struct Ui {
     v: Values,
     hist: [VecDeque<f32>; 9], // ROWS order + net upload at 8
     snakes: [Snake; 8],
+    cpu_name: String,
+    gpu_name: String,
+    /// Per row: 0 = collapsed, 1 = fully shown; eases toward `visible` (linear progress).
+    open: [f32; 8],
     icon_boxes: Vec<(usize, BoxF)>,
+    /// Everything but the ribbon lines; re-rendered only when dirty.
+    stat: Pixmap,
+    /// The previous `stat`, faded out over FADE_S after a new sample.
+    prev: Pixmap,
+    /// Crossfade progress 0..1 (1: done); `fade_next`: the next render starts one.
+    fade: f32,
+    fade_next: bool,
+    /// `stat` + ribbon lines at the current scroll phase (what the window shows).
     base: Pixmap,
+    /// Ribbons whose lines are drawn per frame: (row index, track box).
+    track_boxes: Vec<(usize, BoxF)>,
+    /// Temperature rings drawn per frame: (0 CPU / 1 GPU, value pill box).
+    gauge_boxes: Vec<(usize, BoxF)>,
+    /// Shown CPU / GPU temperatures, easing toward the sampled ones.
+    temps: [Option<f32>; 2],
+    /// Rendering an off-screen block (collapsing row): draw gauges in place.
+    baking: bool,
+    /// 0..1 progress from the last sample toward the next: lines scroll by it.
+    phase: f32,
+    line_acc: f32,
+    lines_dirty: bool,
     overlay: Pixmap,
     dirty: bool,
 }
@@ -158,11 +192,27 @@ impl Ui {
                 net_up: String::new(),
                 fps_name: "FPS".into(),
                 fps_val: "--".into(),
+                fps_over: false,
+                fps_hz: 0,
             },
             hist: Default::default(),
             snakes: [Snake::default(); 8],
+            cpu_name: info.cpu_name.clone(),
+            gpu_name: info.gpu_name.clone(),
+            open: [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0], // iGPU and FPS start hidden
             icon_boxes: Vec::new(),
+            stat: Pixmap::new(1, 1).unwrap(),
+            prev: Pixmap::new(1, 1).unwrap(),
+            fade: 1.0,
+            fade_next: false,
             base: Pixmap::new(1, 1).unwrap(),
+            track_boxes: Vec::new(),
+            gauge_boxes: Vec::new(),
+            temps: [None, None],
+            baking: false,
+            phase: 1.0,
+            line_acc: 0.0,
+            lines_dirty: true,
             overlay: Pixmap::new(1, 1).unwrap(),
             dirty: true,
         }
@@ -197,10 +247,36 @@ impl Ui {
         }
     }
 
+    /// Row + track height (unscaled).
+    fn per(&self) -> f32 {
+        ROW_H + if self.track { 1.0 + TRACK_H + 4.0 } else { 0.0 }
+    }
+
+    /// Eased share of a row's height currently shown (0..1).
+    fn shown(&self, i: usize) -> f32 {
+        let p = self.open[i];
+        p * p * (3.0 - 2.0 * p)
+    }
+
     pub fn size(&self) -> (u32, u32) {
-        let rows = ROWS.iter().filter(|&&g| self.visible(g)).count() as f32;
-        let per = ROW_H + if self.track { 1.0 + TRACK_H + 4.0 } else { 0.0 };
-        (self.u(WIDTH).ceil() as u32, self.u(rows * per).ceil() as u32)
+        let rows: f32 = (0..ROWS.len()).map(|i| self.shown(i)).sum();
+        let dev = if crate::log::dev() { DEV_H } else { 0.0 };
+        (self.u(WIDTH).ceil() as u32, self.u(rows * self.per() + dev).ceil() as u32)
+    }
+
+    /// Ribbon lines still scrolling toward the newest sample.
+    fn lines_moving(&self) -> bool {
+        (self.phase < 1.0 && !self.track_boxes.is_empty()) || self.fade < 1.0 || self.gauge_moving(0) || self.gauge_moving(1)
+    }
+
+    /// A ribbon frame is due (base layer must be pushed this frame).
+    pub fn lines_due(&self) -> bool {
+        self.lines_dirty
+    }
+
+    /// True while a row collapses or expands (the base layer must re-render each frame).
+    pub fn rows_moving(&self) -> bool {
+        ROWS.iter().enumerate().any(|(i, &g)| self.open[i] != if self.visible(g) { 1.0 } else { 0.0 })
     }
 
     // ------------------------------------------------------------------ data
@@ -252,6 +328,9 @@ impl Ui {
                 let disp = game.strip_suffix(".exe").or_else(|| game.strip_suffix(".EXE")).unwrap_or(game);
                 v.fps_name = disp.chars().take(12).collect();
                 v.fps_val = s.fps.map(|f| format!("{f:.0} FPS")).unwrap_or_else(|| "--".into());
+                // 2% slack: a v-synced game jitters just above the refresh rate.
+                v.fps_over = s.fps.is_some_and(|f| f > hz * 1.02);
+                v.fps_hz = s.hz;
                 self.fps_shown = true;
             }
             None => {
@@ -282,7 +361,8 @@ impl Ui {
         let mut push = |i: usize, x: Option<f32>| {
             if let Some(x) = x {
                 let h = &mut self.hist[i];
-                if h.len() >= HIST {
+                // One sample past the left edge: the scrolling tail slides out instead of popping.
+                if h.len() > HIST {
                     h.pop_front();
                 }
                 h.push_back(x.clamp(0.0, 100.0));
@@ -297,34 +377,121 @@ impl Ui {
         push(6, Some(s.net_down)); // 100 MB/s = full scale
         push(8, Some(s.net_up));
         push(7, s.fps.map(|f| f / hz * 100.0));
+        self.phase = 0.0;
+        self.fade_next = true;
         self.dirty = true;
     }
 
     // ------------------------------------------------------------- rendering
     fn render_base(&mut self) {
         let (w, h) = self.size();
-        if self.base.width() != w || self.base.height() != h {
-            self.base = Pixmap::new(w.max(1), h.max(1)).unwrap();
-        } else {
-            self.base.fill(tiny_skia::Color::TRANSPARENT);
+        // New sample, same layout: keep the old frame to crossfade from.
+        self.fade = 1.0;
+        if std::mem::take(&mut self.fade_next) && self.stat.width() == w && self.stat.height() == h {
+            std::mem::swap(&mut self.stat, &mut self.prev);
+            self.fade = 0.0;
         }
-        let mut base = std::mem::replace(&mut self.base, Pixmap::new(1, 1).unwrap());
+        if self.stat.width() != w || self.stat.height() != h {
+            self.stat = Pixmap::new(w.max(1), h.max(1)).unwrap();
+        } else {
+            self.stat.fill(tiny_skia::Color::TRANSPARENT);
+        }
+        let mut base = std::mem::replace(&mut self.stat, Pixmap::new(1, 1).unwrap());
         self.icon_boxes.clear();
+        self.track_boxes.clear();
+        self.gauge_boxes.clear();
         let mut y = 0.0f32;
-        for g in ROWS {
-            if !self.visible(g) {
+        for (i, g) in ROWS.into_iter().enumerate() {
+            let k = self.shown(i);
+            if k <= 0.0 {
                 continue;
             }
-            self.render_row(&mut base.as_mut(), g, y);
-            y += self.u(ROW_H);
-            if self.track {
-                let tb = BoxF { x: 0.0, y: (y + self.u(1.0)).round(), w: self.u(WIDTH).round(), h: self.u(TRACK_H).round() };
-                self.render_track(&mut base.as_mut(), g, tb);
-                y += self.u(1.0 + TRACK_H + 4.0);
+            if k >= 1.0 {
+                if let Some(tb) = self.render_row_block(&mut base.as_mut(), g, y, false) {
+                    self.track_boxes.push((i, tb));
+                }
+            } else {
+                // Collapsing / expanding: the full block, cut to its current height
+                // from the top and faded; no snake while it moves.
+                let full = self.u(self.per()).ceil() as u32;
+                let mut tmp = Pixmap::new(w.max(1), full.max(1)).unwrap();
+                let n = self.icon_boxes.len();
+                self.baking = true;
+                self.render_row_block(&mut tmp.as_mut(), g, 0.0, true);
+                self.baking = false;
+                self.icon_boxes.truncate(n);
+                let ch = ((full as f32 * k).round() as u32).max(1);
+                let row = 4 * w as usize;
+                let mut cut = Pixmap::new(w.max(1), ch).unwrap();
+                cut.data_mut().copy_from_slice(&tmp.data()[..ch as usize * row]);
+                let paint = tiny_skia::PixmapPaint { opacity: k, ..Default::default() };
+                base.draw_pixmap(0, y.round() as i32, cut.as_ref(), &paint, Transform::identity(), None);
+            }
+            y += self.u(self.per()) * k;
+        }
+        if crate::log::dev() {
+            let (fm, t) = (self.font_num(), "developer mode");
+            let w = self.text.measure(fm, t) as f32 + self.u(16.0);
+            let b = BoxF { x: ((self.u(WIDTH) - w) / 2.0).round(), y: y.round(), w: w.round(), h: self.u(DEV_H).round() };
+            self.capsule(&mut base.as_mut(), b);
+            self.label(&mut base.as_mut(), fm, t, b.x + b.w / 2.0, b.y + b.h / 2.0, WATT, Anchor::Center);
+        }
+        self.stat = base;
+        self.dirty = false;
+        self.lines_dirty = true;
+    }
+
+    /// `base` = `stat` + ribbon lines and captions at the current scroll phase.
+    fn compose(&mut self) {
+        if self.base.width() != self.stat.width() || self.base.height() != self.stat.height() {
+            self.base = self.stat.clone();
+        } else {
+            self.base.data_mut().copy_from_slice(self.stat.data());
+        }
+        if self.fade < 1.0 && self.prev.width() == self.stat.width() && self.prev.height() == self.stat.height() {
+            // Premultiplied lerp prev -> stat; only changed pixels (values) actually move.
+            let t = self.fade * self.fade * (3.0 - 2.0 * self.fade);
+            let k = (t * 256.0) as u32;
+            for (d, &o) in self.base.data_mut().iter_mut().zip(self.prev.data()) {
+                let n = *d as u32;
+                if n != o as u32 {
+                    *d = ((o as u32 * (256 - k) + n * k) >> 8) as u8;
+                }
             }
         }
+        let mut base = std::mem::replace(&mut self.base, Pixmap::new(1, 1).unwrap());
+        for (i, tb) in self.track_boxes.clone() {
+            self.track_lines(&mut base.as_mut(), ROWS[i], tb);
+        }
+        for (k, b) in self.gauge_boxes.clone() {
+            // The ring's square comes straight from `stat` (no crossfade ghost of the old number).
+            let (bw, x0) = (self.stat.width() as usize, (b.x + b.w - b.h).max(0.0) as usize);
+            let x1 = ((b.x + b.w).ceil() as usize).min(bw);
+            let (y0, y1) = (b.y.max(0.0) as usize, ((b.y + b.h).ceil() as usize).min(self.stat.height() as usize));
+            for y in y0..y1 {
+                let r = (y * bw + x0) * 4..(y * bw + x1) * 4;
+                base.data_mut()[r.clone()].copy_from_slice(&self.stat.data()[r]);
+            }
+            self.gauge(&mut base.as_mut(), b, self.temps[k]);
+        }
         self.base = base;
-        self.dirty = false;
+        self.lines_dirty = false;
+    }
+
+    /// One row (pills) plus its track at `y`; returns the track box. `lines`: also
+    /// draw the ribbon lines now (else `compose` draws them per frame).
+    fn render_row_block(&mut self, pix: &mut PixmapMut, g: Glyph, y: f32, lines: bool) -> Option<BoxF> {
+        self.render_row(pix, g, y);
+        if !self.track {
+            return None;
+        }
+        let ty = y + self.u(ROW_H);
+        let tb = BoxF { x: 0.0, y: (ty + self.u(1.0)).round(), w: self.u(WIDTH).round(), h: self.u(TRACK_H).round() };
+        self.render_track(pix, tb);
+        if lines {
+            self.track_lines(pix, g, tb);
+        }
+        Some(tb)
     }
 
     fn bg(&self) -> f32 {
@@ -372,7 +539,7 @@ impl Ui {
         let top = (y + self.u(6.0)).round();
         let ib = BoxF { x: self.u(MARGIN).round(), y: top, w: iw, h: ph };
         let vb = BoxF { x: (iw + self.u(2.0 * MARGIN + GAP)).round(), y: top, w: vw, h: ph };
-        let ty = top + (ph / 2.0).floor() + 1.0;
+        let ty = top + ph / 2.0;
 
         // [icon + name]
         self.capsule(pix, ib);
@@ -394,17 +561,18 @@ impl Ui {
                 let label = if sub.is_empty() { format!("{m} ") } else { format!("{m} {sub}") };
                 let end = self.u(12.0) + self.text.measure(fm, &label) as f32;
                 self.minis(pix, vb, end);
-                self.gauge(pix, vb, self.v.cpu_temp);
+                self.gauge_slot(pix, vb, 0);
             }
             Glyph::Gpu => {
                 let (m, sub) = (self.v.gpu_main.clone(), self.v.gpu_sub.clone());
                 self.split_text(pix, &m, &sub, tx, ty);
-                self.gauge(pix, vb, self.v.gpu_temp);
+                self.gauge_slot(pix, vb, 1);
             }
             Glyph::Net => self.eth(pix, vb),
             Glyph::Fps => {
                 let t = self.v.fps_val.clone();
-                self.label(pix, fm, &t, vb.x + vb.w / 2.0, ty, TXT, Anchor::Center);
+                let c = if self.v.fps_over { WATT } else { TXT };
+                self.label(pix, fm, &t, vb.x + vb.w / 2.0, ty, c, Anchor::Center);
             }
             _ => {
                 let t = match g {
@@ -518,6 +686,24 @@ impl Ui {
     }
 
     /// Temperature ring on the capsule's right end disc; fire glyph above 99°.
+    /// Temperature ring: drawn per frame by `compose` while it eases, else baked in place.
+    fn gauge_slot(&mut self, pix: &mut PixmapMut, b: BoxF, k: usize) {
+        if self.baking || !self.gauge_moving(k) {
+            self.gauge(pix, b, self.temps[k]);
+        } else {
+            self.gauge_boxes.push((k, b));
+        }
+    }
+
+    /// Shown temperature `k` still easing toward the sampled one.
+    fn gauge_moving(&self, k: usize) -> bool {
+        let target = if k == 0 { self.v.cpu_temp } else { self.v.gpu_temp };
+        match (target, self.temps[k]) {
+            (Some(g), Some(t)) => (g - t).abs() > 0.05,
+            (g, t) => g.is_some() != t.is_some(),
+        }
+    }
+
     fn gauge(&mut self, pix: &mut PixmapMut, b: BoxF, temp: Option<f32>) {
         let Some(raw) = temp else { return };
         let (cx, cy) = (b.x + b.w - b.h / 2.0, b.y + b.h / 2.0);
@@ -547,7 +733,7 @@ impl Ui {
         } else {
             let t = format!("{}", raw.round().clamp(0.0, 99.0) as i32);
             let fnum = self.font_num();
-            self.label(pix, fnum, &t, cx, cy - 1.0, TXT, Anchor::Center);
+            self.label(pix, fnum, &t, cx, cy, TXT, Anchor::Center);
         }
     }
 
@@ -559,16 +745,23 @@ impl Ui {
         let (dx, ux) = (b.x + (10.0 * s).floor(), b.x + (64.0 * s).floor());
         let down = col(self.accent[idx(Glyph::Net)]);
         let up = col(0xc084fc);
-        draw::fill_rect(pix, dx + 2.5 * s, y - 8.0 * s, 2.0 * s, 7.0 * s, down);
-        let tri = |x: f32, base: f32, tip: f32| [(x, base), (x + 7.0 * s, base), (x + 3.5 * s, tip)];
-        if let Some(p) = draw::polyline(&tri(dx, y - 1.0 * s, y + 5.0 * s), true) {
-            pix.fill_path(&p, &draw::paint(down), FillRule::Winding, Transform::identity(), None);
-        }
-        draw::fill_rect(pix, ux + 2.5 * s, y + 1.0 * s, 2.0 * s, 7.0 * s, up);
-        if let Some(p) = draw::polyline(&tri(ux, y + 1.0 * s, y - 5.0 * s), true) {
-            pix.fill_path(&p, &draw::paint(up), FillRule::Winding, Transform::identity(), None);
-        }
-        let ty = b.y + (b.h / 2.0).floor() + 1.0;
+        // Stroked arrow (shaft + chevron), as tall as the digits next to it.
+        let arrow = |pix: &mut PixmapMut, x: f32, dir: f32, c| {
+            let (h, w) = (5.0 * s, 3.5 * s); // half height, chevron half width
+            let (tail, tip) = (y - dir * h, y + dir * h);
+            let mut pb = tiny_skia::PathBuilder::new();
+            pb.move_to(x, tail);
+            pb.line_to(x, tip);
+            pb.move_to(x - w, tip - dir * w);
+            pb.line_to(x, tip);
+            pb.line_to(x + w, tip - dir * w);
+            if let Some(p) = pb.finish() {
+                pix.stroke_path(&p, &draw::paint(c), &draw::stroke(1.8 * s, LineCap::Round), Transform::identity(), None);
+            }
+        };
+        arrow(pix, dx + 3.5 * s, 1.0, down);
+        arrow(pix, ux + 3.5 * s, -1.0, up);
+        let ty = y;
         let (d, u) = (self.v.net_down.clone(), self.v.net_up.clone());
         self.label(pix, fm, &d, dx + 10.0 * s, ty, TXT, Anchor::West);
         self.label(pix, fm, &u, ux + 10.0 * s, ty, TXT, Anchor::West);
@@ -576,7 +769,7 @@ impl Ui {
     }
 
     /// 60s history ribbon.
-    fn render_track(&self, pix: &mut PixmapMut, g: Glyph, b: BoxF) {
+    fn render_track(&mut self, pix: &mut PixmapMut, b: BoxF) {
         let m = self.u(2.0);
         draw::fill_rrect(pix, b.x + m, b.y + m, b.w - 2.0 * m, b.h - 2.0 * m, self.u(PILL_H / 2.0), col_a(PILL, self.bg()));
         let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
@@ -592,12 +785,32 @@ impl Ui {
                 x += self.u(16.0);
             }
         }
+    }
+
+    /// Ribbon lines + captions. Lines scroll left by `phase` of a step and end in
+    /// a head easing from the previous sample to the newest (one sample behind,
+    /// so the motion never jumps).
+    fn track_lines(&mut self, pix: &mut PixmapMut, g: Glyph, b: BoxF) {
+        let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
+        let (x0, x1) = (b.x + self.u(6.0), b.x + b.w - self.u(6.0));
+        let (step, ph) = ((x1 - x0) / (HIST as f32 - 1.0), self.phase);
         let line = |pix: &mut PixmapMut, vals: &VecDeque<f32>, c: u32| {
-            if vals.len() < 2 {
+            let n = vals.len();
+            if n < 2 {
                 return;
             }
-            let n = vals.len() as f32 - 1.0;
-            let pts: Vec<(f32, f32)> = vals.iter().enumerate().map(|(i, &v)| (x0 + i as f32 * (x1 - x0) / n, gy(v))).collect();
+            let mut pts: Vec<(f32, f32)> =
+                vals.iter().take(n - 1).enumerate().map(|(i, &v)| (x1 - ((n - 2 - i) as f32 + ph) * step, gy(v))).collect();
+            pts.push((x1, gy(vals[n - 2] + (vals[n - 1] - vals[n - 2]) * ph)));
+            // Clip the tail exactly at the left edge.
+            if let Some(k) = pts.iter().position(|p| p.0 >= x0) {
+                if k > 0 {
+                    let ((ax, ay), (bx, by)) = (pts[k - 1], pts[k]);
+                    let t = (x0 - ax) / (bx - ax).max(1e-3);
+                    pts.drain(..k - 1);
+                    pts[0] = (x0, ay + (by - ay) * t);
+                }
+            }
             if let Some(p) = draw::polyline(&pts, false) {
                 pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), None);
             }
@@ -606,6 +819,19 @@ impl Ui {
         line(pix, &self.hist[i], self.accent[i]);
         if g == Glyph::Net {
             line(pix, &self.hist[8], 0xc084fc);
+        }
+        // Captions: model name top-left (CPU / GPU), full scale top-right (FPS: refresh rate).
+        let (fnum, ty) = (self.font_num(), b.y + self.u(14.0)); // under the 100% line (gy(100) = +5)
+        let name = match g {
+            Glyph::Cpu => self.cpu_name.clone(),
+            Glyph::Gpu => self.gpu_name.clone(),
+            _ => String::new(),
+        };
+        self.label(pix, fnum, &name, x0 + self.u(4.0), ty, TRACK_LBL, Anchor::West);
+        if g == Glyph::Fps && self.v.fps_hz > 0 {
+            let t = format!("{} Hz", self.v.fps_hz);
+            let w = self.text.measure(fnum, &t) as f32;
+            self.label(pix, fnum, &t, x1 - w - self.u(4.0), ty, TRACK_LBL, Anchor::West);
         }
     }
 
@@ -618,11 +844,50 @@ impl Ui {
             s.head = (s.head + 0.009 * f).fract();
             s.len += (s.target - s.len) * ease;
         }
+        // Temperature rings ease like the snakes: arc, color and number move together.
+        let mut gauges = false;
+        for (k, target) in [self.v.cpu_temp, self.v.gpu_temp].into_iter().enumerate() {
+            let was = self.gauge_moving(k);
+            let t = &mut self.temps[k];
+            *t = match (*t, target) {
+                (Some(c), Some(g)) if (g - c).abs() > 0.05 => Some(c + (g - c) * ease),
+                _ => target,
+            };
+            gauges |= self.gauge_moving(k);
+            if was && !self.gauge_moving(k) {
+                self.dirty = true; // settled: bake it into the static layer
+                self.lines_dirty = true;
+            }
+        }
+        if self.fade < 1.0 {
+            self.fade = (self.fade + dt / FADE_S).min(1.0);
+            self.lines_dirty |= self.fade >= 1.0; // land exactly on the new frame
+        }
+        // One 30 fps clock for every per-frame layer change (ribbon scroll, easing rings).
+        let scrolling = self.phase < 1.0;
+        if scrolling {
+            self.phase = (self.phase + dt / SAMPLE_S).min(1.0);
+        }
+        if scrolling || gauges {
+            self.line_acc += dt;
+            if self.line_acc >= 1.0 / LINES_FPS || (scrolling && self.phase >= 1.0) {
+                self.line_acc = 0.0;
+                self.lines_dirty = true;
+            }
+        }
+        let d = dt / ROW_ANIM_S;
+        for (i, &g) in ROWS.iter().enumerate() {
+            let t = if self.visible(g) { 1.0 } else { 0.0 };
+            if self.open[i] != t {
+                self.open[i] = if t > self.open[i] { (self.open[i] + d).min(t) } else { (self.open[i] - d).max(t) };
+                self.dirty = true;
+            }
+        }
     }
 
     /// True while some visible snake moves (rotating segment or easing length).
     pub fn animating(&self) -> bool {
-        self.icon_boxes.iter().any(|&(i, _)| {
+        self.lines_moving() || self.rows_moving() || self.icon_boxes.iter().any(|&(i, _)| {
             let s = self.snakes[i];
             let full = s.len > 0.985 && s.target > 0.985;
             (s.len >= 0.01 && !full) || (s.target - s.len).abs() > 0.002
@@ -633,6 +898,9 @@ impl Ui {
     pub fn base(&mut self) -> &Pixmap {
         if self.dirty {
             self.render_base();
+        }
+        if self.lines_dirty {
+            self.compose();
         }
         &self.base
     }
@@ -649,7 +917,7 @@ impl Ui {
         }
         let pad = self.u(2.0).ceil() + 1.0;
         let w = self.snake_rows().map(|(_, b)| b.x + b.w + pad).fold(1.0, f32::max).ceil() as u32;
-        let h = (self.snake_rows().map(|(_, b)| b.y + b.h + pad).fold(1.0, f32::max).ceil() as u32).min(self.base.height());
+        let h = (self.snake_rows().map(|(_, b)| b.y + b.h + pad).fold(1.0, f32::max).ceil() as u32).min(self.stat.height());
         if self.overlay.width() != w || self.overlay.height() != h {
             self.overlay = Pixmap::new(w.max(1), h.max(1)).unwrap();
         } else {

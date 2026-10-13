@@ -114,9 +114,11 @@ fn start(game: &str) -> Option<Capture> {
             let line = String::from_utf8_lossy(&raw);
             let parts: Vec<&str> = line.trim().split(',').collect();
             if mi == usize::MAX {
-                mi = parts.iter().position(|h| h.trim() == "MsBetweenPresents").unwrap_or(usize::MAX);
-                ti = parts.iter().position(|h| h.trim() == "TimeInSeconds").unwrap_or(usize::MAX);
-                ci = parts.iter().position(|h| h.trim() == "SwapChainAddress").unwrap_or(usize::MAX);
+                // v1 metrics spell it "msBetweenPresents"; match case-insensitively.
+                let col = |n: &str| parts.iter().position(|h| h.trim().eq_ignore_ascii_case(n)).unwrap_or(usize::MAX);
+                mi = col("MsBetweenPresents");
+                ti = col("TimeInSeconds");
+                ci = col("SwapChainAddress");
                 if mi == usize::MAX || ti == usize::MAX {
                     mi = usize::MAX; // keep looking for the header
                 }

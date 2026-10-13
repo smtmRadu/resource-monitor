@@ -1,7 +1,11 @@
-//! Game detection: fullscreen foreground app, else a known game exe running.
+//! Game detection: the foreground app when it covers its monitor (fullscreen /
+//! borderless) or renders 3D (windowed); kept while unfocused, until it exits.
+//! Else a known game exe running.
 use std::time::{Duration, Instant};
 
 use windows::core::PWSTR;
+use std::collections::HashMap;
+
 use windows::Win32::Foundation::{CloseHandle, RECT};
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
@@ -17,6 +21,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, IsZoomed,
     GWL_STYLE, WS_CAPTION,
 };
+
+use super::pdh::Gpu3d;
+
+/// Foreground process 3D engine load (%) that marks a windowed game.
+const MIN_3D: f32 = 5.0;
 
 const GAME_EXES: &[&str] = &[
     "cs2.exe", "valorant.exe", "fortniteclient-win64-shipping.exe", "cod.exe", "cyberpunk2077.exe",
@@ -36,6 +45,7 @@ const NOT_GAMES: &[&str] = &[
     "brave.exe", "opera.exe", "vivaldi.exe", "arc.exe", "vlc.exe", "mpv.exe", "mpc-hc.exe", "mpc-hc64.exe",
     "mpc-be64.exe", "potplayermini64.exe", "wmplayer.exe", "microsoft.media.player.exe", "video.ui.exe",
     "powerpnt.exe", "windowsterminal.exe", "code.exe", "msedgewebview2.exe", "photos.exe",
+    "blender.exe", "unity.exe", "unity hub.exe", "obs64.exe", "discord.exe", "steamwebhelper.exe",
 ];
 
 pub struct Scan {
@@ -47,32 +57,43 @@ pub struct Scan {
 
 pub struct Detector {
     running: Option<String>,
+    /// Last game seen fullscreen (pid, exe): stays the game while unfocused, until it exits.
+    seen: Option<(u32, String)>,
     lhm_app: bool,
     scanned: Option<Instant>,
     me: u32,
     /// Last foreground pid and its exe name (lookup costs an OpenProcess).
     fg_cache: Option<(u32, Option<String>)>,
+    gpu3d: Gpu3d,
+    /// Per-pid 3D load over the last scan interval.
+    load3d: HashMap<u32, f32>,
 }
 
 impl Detector {
     pub fn new() -> Self {
-        Self { running: None, lhm_app: false, scanned: None, me: unsafe { GetCurrentProcessId() }, fg_cache: None }
+        Self { running: None, seen: None, lhm_app: false, scanned: None, me: unsafe { GetCurrentProcessId() }, fg_cache: None, gpu3d: Gpu3d::new(), load3d: HashMap::new() }
     }
 
     pub fn tick(&mut self) -> Scan {
         // The process list changes slowly; walking it every 5s is plenty.
         if self.scanned.is_none_or(|t| t.elapsed() > Duration::from_secs(5)) {
             self.scan_processes();
+            self.load3d = self.gpu3d.sample();
             self.scanned = Some(Instant::now());
         }
         let mut hz = None;
         let fg = self.foreground(&mut hz);
-        Scan { game: fg.or_else(|| self.running.clone()), hz, lhm_app_running: self.lhm_app }
+        if let (Some(name), Some((pid, _))) = (&fg, &self.fg_cache) {
+            self.seen = Some((*pid, name.clone()));
+        }
+        let seen = self.seen.as_ref().map(|(_, n)| n.clone());
+        Scan { game: fg.or(seen).or_else(|| self.running.clone()), hz, lhm_app_running: self.lhm_app }
     }
 
     fn scan_processes(&mut self) {
         self.running = None;
         self.lhm_app = false;
+        let mut seen_alive = false;
         unsafe {
             let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else { return };
             let mut e = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
@@ -84,6 +105,9 @@ impl Detector {
                 if self.running.is_none() && GAME_EXES.contains(&low.as_str()) {
                     self.running = Some(name);
                 }
+                if self.seen.as_ref().is_some_and(|(pid, _)| *pid == e.th32ProcessID) {
+                    seen_alive = true;
+                }
                 if low == "librehardwaremonitor.exe" {
                     self.lhm_app = true;
                 }
@@ -91,9 +115,12 @@ impl Detector {
             }
             let _ = CloseHandle(snap);
         }
+        if !seen_alive {
+            self.seen = None;
+        }
     }
 
-    /// Foreground window covering its whole monitor (not just the primary one).
+    /// Foreground game: covers its whole monitor (not just the primary one), or renders 3D.
     fn foreground(&mut self, hz: &mut Option<u32>) -> Option<String> {
         unsafe {
             let hwnd = GetForegroundWindow();
@@ -114,18 +141,17 @@ impl Detector {
                 return None;
             }
             let m = mx.monitorInfo.rcMonitor;
-            if !(r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom) {
-                return None;
-            }
+            let covers = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
             // A maximized window overhangs the work area by its borders, so on a
-            // display without a taskbar it "covers" the monitor too: not a game.
+            // display without a taskbar it "covers" the monitor too: not fullscreen.
             let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-            if IsZoomed(hwnd).as_bool() || style & WS_CAPTION.0 == WS_CAPTION.0 {
-                return None;
-            }
+            let full = covers && !IsZoomed(hwnd).as_bool() && style & WS_CAPTION.0 != WS_CAPTION.0;
             let mut pid = 0u32;
             GetWindowThreadProcessId(hwnd, Some(&mut pid));
             if pid == 0 || pid == self.me {
+                return None;
+            }
+            if !full && self.load3d.get(&pid).is_none_or(|u| *u < MIN_3D) {
                 return None;
             }
             if self.fg_cache.as_ref().is_none_or(|(p, _)| *p != pid) {

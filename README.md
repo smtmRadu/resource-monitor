@@ -42,12 +42,25 @@ ribbon**. A "snake" runs around each icon pill; its length is the live value.
 | iGPU | load % (row appears on activity, hides after 5 s at 0%) | iGPU load |
 | DISK | transfer MB/s + a storage bar per drive (color = physical disk; red under 10% free, like Explorer) | storage used, all drives |
 | ETH | download / upload MB/s | — |
-| FPS | game name + FPS (row appears only while a game runs) | FPS / monitor refresh rate |
+| FPS | game name + FPS, yellow above the refresh rate (row appears only while a game runs) | FPS / refresh rate of the game's monitor |
 
-Temperature rings fill from 40 °C to 99 °C; above 99 °C they show a flame.
-In **game mode** (a fullscreen game or a known game running) the pill
-backgrounds fade to 25% and text gets a dark halo, so the overlay stays readable
-without hiding the game.
+Temperature rings fill from 40 °C to 99 °C; above 99 °C they show a flame. They
+ease to each new reading (arc, color and number together). Other values
+crossfade over 0.3 s. The history ribbons scroll smoothly; the CPU and GPU
+ribbons name the model, and the FPS ribbon shows its full scale (the refresh
+rate; a faster game stays capped at the top line, the number shows the real FPS).
+Rows that appear or hide (iGPU, FPS) collapse and expand smoothly.
+
+**Game detection:** the focused app counts as a game when it covers its monitor
+(fullscreen / borderless) or renders 3D (windowed, ≥ 5% of the GPU's 3D engine),
+or when a known game exe runs. A detected game stays the game while unfocused,
+until it exits. In **game mode** the pill backgrounds fade to 25% and text gets
+a dark halo, so the overlay stays readable without hiding the game.
+
+Games in **exclusive / optimized fullscreen** (e.g. Dark Souls III's
+"Fullscreen") are drawn without the desktop compositor, so no normal window can
+show above them. Use the game's **borderless** or **windowed** mode to see the
+monitor while playing.
 
 ## Controls
 The window is click-through, so everything lives in the **tray icon**
@@ -120,7 +133,7 @@ are needed except where noted.
 | Disk MB/s | PDH `PhysicalDisk(_Total)` | no |
 | Drive usage + physical disk | `GetDiskFreeSpaceExW` (every 5 s) + `IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS` | no |
 | Network MB/s | `GetIfEntry2` on physical NICs only | no |
-| Game detection | fullscreen foreground window (per monitor) or a known game exe | no |
+| Game detection | foreground window covering its monitor or using the 3D engine (PDH `GPU Engine`, per process), or a known game exe | no |
 | FPS | PresentMon child process (`vendor/PresentMon`), game's main swap chain | **yes** |
 | Exact CPU sensors (Tctl / package) | LibreHardwareMonitor via `vendor/lhm_bridge.ps1`; preferred when available | **yes** (or LHM app running) |
 
@@ -128,24 +141,27 @@ Helper processes run in a kill-on-close job object, so they never outlive the
 monitor.
 
 ## Footprint
-Measured on a Ryzen 7 7840HS + RTX 4060 Laptop (16 threads), 1x, all rows,
-snakes at 60 fps, over 60 s:
+Measured with v0.3.1 on a Core Ultra 9 275HX + RTX 5070 Ti Laptop (24 threads),
+1x, all rows and animations, elevated (FPS + LHM sensors), over 60 s:
 
-| | Rust (this) | Python (previous) |
-|---|---|---|
-| CPU | **2.6% of one core** (0.16% of the whole CPU) | 5.7% of one core, snakes at 24 fps, plus 2 `nvidia-smi` launches per second |
-| GPU | 0% | — |
-| Memory | **36 MB** working set, 23 MB private (about 16 MB of it is NVIDIA's NVML) | 57 MB + a 56 MB helper process |
-| Disk I/O | 0 KB | log line every second |
-| Threads / GDI objects | 4 / 13 | — |
-| Executable | 900 KB | Python + packages |
+| | |
+|---|---|
+| CPU | **2.9% of one core** (0.12% of the whole CPU) |
+| GPU | 0% |
+| Memory | **55 MB** working set, 35 MB private (NVIDIA's NVML is a good part of it) |
+| Disk I/O | 0 KB |
+| Threads / GDI objects | 14 / 13 |
+| Executable | 900 KB |
 
 How it stays light:
 - Metrics are sampled once per second on one background thread (~0.2 ms per tick).
-- The static layer (pills, text, rings, ribbons) is redrawn once per second.
+- The static layer (pills, text, ribbon backgrounds) is redrawn once per second.
+- Ribbon lines, easing rings and the values crossfade are composited onto a
+  cached copy of that layer at 30 fps (~0.1 ms per frame); a settled ring is
+  baked back into the static layer.
 - The snakes live on a small separate overlay window over the icon column and
-  are redrawn at the monitor refresh rate, paced by `DwmFlush`. Pacing stops
-  when no snake moves or the monitor is hidden.
+  are redrawn at up to 60 fps (the monitor refresh rate on slower panels),
+  paced by `DwmFlush`. Pacing stops when nothing moves or the monitor is hidden.
 - Adapter discovery uses D3DKMT instead of DXGI, which would wake a sleeping
   NVIDIA GPU on hybrid laptops (2 W → 17 W).
 - The update check is one ~13 KB request per hour. Installed files are hashed

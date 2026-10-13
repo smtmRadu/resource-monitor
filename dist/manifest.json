@@ -1,10 +1,10 @@
 {
-    "version":  "0.3.0",
+    "version":  "0.3.1",
     "files":  [
                   {
                       "path":  "resource-monitor-rs.exe",
                       "src":  "dist/resource-monitor-rs.exe",
-                      "sha256":  "0e2f8c8f72821ee5fdc4a848ae41abb80e38b7ac5621e8664068513c15939435"
+                      "sha256":  "618226e2f8e4531b59896ecbf696eec7211f1abfc69c339182edae69cb89b9b7"
                   },
                   {
                       "path":  "setup_task.ps1",
@@ -44,7 +44,7 @@
                   {
                       "path":  "vendor/LHM/LibreHardwareMonitor.config",
                       "src":  "vendor/LHM/LibreHardwareMonitor.config",
-                      "sha256":  "b663e75c7364ff6d83a24514c81b75b142fe80aac9d9600b67d1f0f2761e0e8a"
+                      "sha256":  "404e222c12b36bba3e1979514ac5c303cc26f724be5876c3f861f2f4c5c64dd2"
                   },
                   {
                       "path":  "vendor/LHM/LibreHardwareMonitor.exe",
@@ -54,7 +54,7 @@
                   {
                       "path":  "vendor/LHM/LibreHardwareMonitor.exe.config",
                       "src":  "vendor/LHM/LibreHardwareMonitor.exe.config",
-                      "sha256":  "29c7a5ba8d2fe2191171e7ba66e8832c6728fe8ac1b7d8c68413db2348beb44a"
+                      "sha256":  "523c8c67b67a68d9a51d2339b64bff1e04f65b2ef39a895cc0fe260b46e48778"
                   },
                   {
                       "path":  "vendor/LHM/LibreHardwareMonitorLib.dll",

@@ -188,6 +188,50 @@ unsafe fn array(c: PDH_HCOUNTER) -> Vec<(String, f64)> {
     out
 }
 
+/// Per-process 3D engine load (%), averaged between `sample` calls.
+pub struct Gpu3d {
+    query: PDH_HQUERY,
+    c: Option<PDH_HCOUNTER>,
+}
+
+// Used from the sampler thread only.
+unsafe impl Send for Gpu3d {}
+
+impl Gpu3d {
+    pub fn new() -> Self {
+        let mut s = Self { query: PDH_HQUERY::default(), c: None };
+        unsafe {
+            if PdhOpenQueryW(PCWSTR::null(), 0, &mut s.query) != 0 {
+                return s;
+            }
+            let w = wide(r"\GPU Engine(*engtype_3D)\Utilization Percentage");
+            let mut c = PDH_HCOUNTER::default();
+            if PdhAddEnglishCounterW(s.query, PCWSTR(w.as_ptr()), 0, &mut c) == 0 {
+                s.c = Some(c);
+                let _ = PdhCollectQueryData(s.query);
+            }
+        }
+        s
+    }
+
+    pub fn sample(&mut self) -> HashMap<u32, f32> {
+        let mut out = HashMap::new();
+        unsafe {
+            let Some(c) = self.c else { return out };
+            if PdhCollectQueryData(self.query) != 0 {
+                return out;
+            }
+            for (name, v) in array(c) {
+                // pid_1234_luid_..._engtype_3D
+                if let Some(pid) = name.strip_prefix("pid_").and_then(|r| r.split('_').next()).and_then(|p| p.parse().ok()) {
+                    *out.entry(pid).or_default() += v as f32;
+                }
+            }
+        }
+        out
+    }
+}
+
 unsafe fn pwstr(p: PWSTR) -> String {
     if p.is_null() {
         return String::new();

@@ -179,6 +179,12 @@ fn remote(pin: bool) -> Result<Remote, String> {
     parse(&get(&format!("{base}dist/manifest.json"), None)?, base)
 }
 
+/// `v` is a newer version than this build (dotted numbers; same or older: no arrow).
+fn newer(v: &str) -> bool {
+    let parse = |s: &str| s.split('.').map(|p| p.parse::<u64>().unwrap_or(0)).collect::<Vec<_>>();
+    parse(v) > parse(VERSION)
+}
+
 /// Files that are missing or differ locally.
 fn needed(r: &Remote) -> Vec<&File> {
     r.files.iter().filter(|f| local_sha(&home().join(&f.path)).as_deref() != Some(f.sha256.as_str())).collect()
@@ -319,7 +325,9 @@ pub fn tick(hwnd: HWND) {
     }
     let h = hwnd.0 as isize;
     std::thread::spawn(move || {
-        let r = remote(false).map(|r| (!needed(&r).is_empty()).then(|| r.version.clone()));
+        // Only a newer version flags the arrow; same-version file differences are a
+        // repair, offered when the version item is clicked.
+        let r = remote(false).map(|r| (newer(&r.version) && !needed(&r).is_empty()).then(|| r.version.clone()));
         if let Ok(latest) = &r {
             set_latest(HWND(h as *mut _), latest.clone());
         }
@@ -365,14 +373,14 @@ fn manual(hwnd: HWND) -> Result<Option<String>, String> {
     let flagged = latest().is_some();
     let r = remote(true)?;
     let files = needed(&r);
-    set_latest(hwnd, (!files.is_empty()).then(|| r.version.clone()));
+    set_latest(hwnd, (newer(&r.version) && !files.is_empty()).then(|| r.version.clone()));
     if files.is_empty() {
         message(&format!("Resource Monitor {VERSION} is up to date."), false);
         return Ok(None);
     }
     // A flagged update (green arrow) installs on click; a fresh find asks first.
     if !flagged {
-        let q = if r.version == VERSION {
+        let q = if !newer(&r.version) {
             "Some Resource Monitor files are missing or damaged.\n\nRepair now? It restarts in a few seconds.".to_string()
         } else {
             format!("Resource Monitor {} is available (you have {VERSION}).\n\nUpdate now? It restarts in a few seconds.", r.version)

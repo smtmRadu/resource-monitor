@@ -1,6 +1,6 @@
 [package]
 name = "resource-monitor-rs"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 description = "Always-on-top transparent pill resource monitor for Windows (Rust port)"
 

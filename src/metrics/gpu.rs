@@ -6,7 +6,9 @@
 use std::ffi::c_void;
 use std::sync::OnceLock;
 
+use windows::core::w;
 use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS};
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Vendor {
@@ -156,6 +158,43 @@ pub fn cpu_vendor() -> Vendor {
     } else {
         Vendor::Unknown
     }
+}
+
+/// CPU model, short ("Core Ultra 9 275HX"); empty when unknown.
+pub fn cpu_name() -> String {
+    let mut buf = [0u16; 128];
+    let mut len = (buf.len() * 2) as u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            w!(r"HARDWARE\DESCRIPTION\System\CentralProcessor\0"),
+            w!("ProcessorNameString"),
+            RRF_RT_REG_SZ,
+            None,
+            Some(buf.as_mut_ptr().cast()),
+            Some(&mut len),
+        )
+    }
+    .is_ok();
+    let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+    if ok { short_name(&String::from_utf16_lossy(&buf[..n])) } else { String::new() }
+}
+
+/// dGPU model, short ("GeForce RTX 5070 Ti Laptop"); empty without a dGPU.
+pub fn dgpu_name() -> String {
+    adapters().iter().find(|a| a.is_dgpu).map(|a| short_name(&a.name)).unwrap_or_default()
+}
+
+/// Drop vendor names, trademarks and filler from a marketing name.
+fn short_name(s: &str) -> String {
+    let s = s.split(" @ ").next().unwrap_or(s); // "... CPU @ 2.40GHz"
+    let s = s.split(" with ").next().unwrap_or(s); // "... with Radeon Graphics"
+    const DROP: &[&str] = &["(R)", "(TM)", "(tm)", "NVIDIA", "AMD", "Intel", "CPU", "GPU", "Processor"];
+    s.split_whitespace()
+        .map(|w| DROP.iter().fold(w.to_string(), |w, d| w.replace(d, "")))
+        .filter(|w| !w.is_empty() && !w.ends_with("-Core"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn dgpu_vendor() -> Vendor {

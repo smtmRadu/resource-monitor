@@ -17,6 +17,9 @@ struct Font {
     h: HFONT,
     asc: i32,
     desc: i32,
+    /// Vertical center of rendered digits/capitals below the line-box top
+    /// (measured from real ink once; GDI's cap metric is off by ~1px).
+    mid: Option<f32>,
 }
 
 pub struct Text {
@@ -52,7 +55,7 @@ impl Text {
             let mut tm = TEXTMETRICW::default();
             let _ = GetTextMetricsW(dc, &mut tm);
             SelectObject(dc, old);
-            Font { h, asc: tm.tmAscent, desc: tm.tmDescent }
+            Font { h, asc: tm.tmAscent, desc: tm.tmDescent, mid: None }
         })
     }
 
@@ -106,13 +109,57 @@ impl Text {
         self.bh = h;
     }
 
-    /// Draw `s` with Tk anchor semantics: the line box is vertically centered on `yc`.
+    /// Ink center of "0123456789HM%" for this size: render once, scan its rows.
+    fn ink_mid(&mut self, px: i32) -> f32 {
+        if let Some(m) = self.font(px).mid {
+            return m;
+        }
+        const PROBE: &str = "0123456789HM%";
+        let w = self.measure(px, PROBE) + 4;
+        let (h, lh) = {
+            let f = self.font(px);
+            (f.h, f.asc + f.desc)
+        };
+        self.ensure(w, lh);
+        let mut mid = lh as f32 / 2.0;
+        if !self.bits.is_null() {
+            let bw = self.bw as usize;
+            let mut rows = Vec::new();
+            unsafe {
+                for y in 0..lh as usize {
+                    std::ptr::write_bytes(self.bits.add(y * bw * 4), 0, w as usize * 4);
+                }
+                let old = SelectObject(self.dc, h.into());
+                SetBkMode(self.dc, TRANSPARENT);
+                SetTextColor(self.dc, COLORREF(0x00ff_ffff));
+                let _ = TextOutW(self.dc, 2, 0, &wide(PROBE));
+                SelectObject(self.dc, old);
+                let _ = GdiFlush();
+                for y in 0..lh as usize {
+                    let row = std::slice::from_raw_parts(self.bits.add(y * bw * 4), w as usize * 4);
+                    if row.iter().any(|&b| b > 96) {
+                        rows.push(y);
+                    }
+                }
+            }
+            if let (Some(a), Some(b)) = (rows.first(), rows.last()) {
+                mid = (*a + *b + 1) as f32 / 2.0;
+            }
+        }
+        if let Some(f) = self.fonts.get_mut(&px) {
+            f.mid = Some(mid);
+        }
+        mid
+    }
+
+    /// Draw `s` with Tk anchor semantics, the digits/capitals vertically centered on `yc`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(&mut self, pix: &mut PixmapMut, px: i32, s: &str, x: f32, yc: f32, color: u32, anchor: Anchor) {
         if s.is_empty() {
             return;
         }
         let tw = self.measure(px, s);
+        let mid = self.ink_mid(px);
         let (h, asc, desc) = {
             let f = self.font(px);
             (f.h, f.asc, f.desc)
@@ -141,7 +188,7 @@ impl Text {
             Anchor::West => x.round() as i32,
             Anchor::Center => x.round() as i32 - tw / 2,
         } - pad;
-        let top = yc.round() as i32 - lh / 2;
+        let top = (yc - mid).round() as i32;
         let (fr, fg, fb) = ((color >> 16) & 255, (color >> 8) & 255, color & 255);
         let (pw, ph) = (pix.width() as i32, pix.height() as i32);
         let data = pix.data_mut();

@@ -94,6 +94,17 @@ pub fn run(dir: &str) {
     ui.apply(&synth(true));
     ui.step(0.4);
     save(&mut ui, dir, "game", &mut report);
+    // Uncapped game above a 165 Hz monitor: yellow FPS value.
+    ui.apply(&Snapshot { fps: Some(210.0), hz: 165, ..synth(true) });
+    ui.base(); // starts the values crossfade
+    ui.step(0.35); // ... and runs it to the end
+    save(&mut ui, dir, "game_over", &mut report);
+    // Game ended: FPS row halfway through its collapse.
+    ui.apply(&synth(false));
+    ui.step(0.15);
+    save(&mut ui, dir, "collapse", &mut report);
+    ui.step(0.3);
+    ui.apply(&synth(true));
     ui.track = false;
     save(&mut ui, dir, "notrack", &mut report);
     ui.track = true;
@@ -112,6 +123,24 @@ pub fn run(dir: &str) {
         ui.overlay();
     }
     let _ = writeln!(report, "anim frame avg {:?}", t.elapsed() / 200);
+    // Ribbon scroll frame cost at 1x (static layer copy + lines + captions), 30 fps.
+    ui.apply(&synth(false));
+    ui.base();
+    let t = Instant::now();
+    for _ in 0..29 {
+        ui.step(1.0 / 30.0);
+        ui.base();
+    }
+    let _ = writeln!(report, "lines frame avg {:?}", t.elapsed() / 29);
+    // Same with the values crossfade running (first FADE_S after a sample).
+    let t = Instant::now();
+    for _ in 0..20 {
+        ui.apply(&synth(false));
+        ui.base();
+        ui.step(1.0 / 30.0);
+        ui.base();
+    }
+    let _ = writeln!(report, "sample + fade frame avg {:?}", t.elapsed() / 20);
     metrics::stop();
 
     // Tray version item (normal + hover), up to date and with an update.

@@ -62,11 +62,14 @@ pub struct Snapshot {
 }
 
 /// Static facts the UI needs before the first sample (icon colors, core grid).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Info {
     pub cores: usize,
     pub cpu_vendor: Vendor,
     pub gpu_vendor: Vendor,
+    /// Short model names, shown on the CPU / GPU ribbons.
+    pub cpu_name: String,
+    pub gpu_name: String,
 }
 
 static LATEST: Mutex<Option<Snapshot>> = Mutex::new(None);
@@ -82,6 +85,8 @@ pub fn info() -> Info {
         cores: cpu::core_count().max(1),
         cpu_vendor: gpu::cpu_vendor(),
         gpu_vendor: gpu::dgpu_vendor(),
+        cpu_name: gpu::cpu_name(),
+        gpu_name: gpu::dgpu_name(),
     }
 }
 

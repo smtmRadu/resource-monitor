@@ -218,9 +218,10 @@ pub fn menu_dpi() -> u32 {
     MENU_DPI.get()
 }
 
-/// Version item text: ("Version x", Some("↑y") when an update is available).
+/// Version item text: ("Version x" with a "-dev" suffix in dev builds, Some("↑y") when an update is available).
 pub fn version_label() -> (String, Option<String>) {
-    (format!("Version {}", crate::update::VERSION), crate::update::latest().map(|v| format!("\u{2191}{v}")))
+    let dev = if crate::log::dev() { "-dev" } else { "" };
+    (format!("Version {}{dev}", crate::update::VERSION), crate::update::latest().map(|v| format!("\u{2191}{v}")))
 }
 
 const GREEN: COLORREF = COLORREF(0x004a_a316); // #16a34a (0x00BBGGRR)

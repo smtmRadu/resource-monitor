@@ -134,8 +134,9 @@ struct App {
 }
 
 /// Frame pacing: a thread waits for each DWM composition (= monitor refresh)
-/// and posts one WM_APP_FRAME, only while a snake moves. At most one frame
-/// message is queued at a time, so a slow frame never builds a backlog.
+/// and posts one WM_APP_FRAME, only while a snake moves, capped at 60 fps
+/// (faster panels skip compositions until the next 1/60 s slot is due). At most
+/// one frame message is queued at a time, so a slow frame never builds a backlog.
 static ANIM_WANTED: AtomicBool = AtomicBool::new(false);
 static FRAME_PENDING: AtomicBool = AtomicBool::new(false);
 static PACER_HWND: AtomicIsize = AtomicIsize::new(0);
@@ -143,6 +144,8 @@ static PACER: OnceLock<Thread> = OnceLock::new();
 
 fn pacer() {
     use windows::Win32::Graphics::Dwm::DwmFlush;
+    const FRAME: std::time::Duration = std::time::Duration::from_micros(16_667); // 60 fps cap
+    let mut due = Instant::now();
     loop {
         while !ANIM_WANTED.load(Ordering::Acquire) {
             std::thread::park();
@@ -155,6 +158,13 @@ fn pacer() {
         if !flushed || spent < std::time::Duration::from_millis(2) {
             std::thread::sleep(std::time::Duration::from_millis(16).saturating_sub(spent));
         }
+        // 1 ms slack: a 60 Hz composition that lands a hair early still counts.
+        let now = Instant::now();
+        if now + std::time::Duration::from_millis(1) < due {
+            continue;
+        }
+        // Next slot one frame on; after a stall, restart from now (no catch-up burst).
+        due = (due + FRAME).max(now);
         if ANIM_WANTED.load(Ordering::Acquire) && !FRAME_PENDING.swap(true, Ordering::AcqRel) {
             let h = HWND(PACER_HWND.load(Ordering::Acquire) as *mut _);
             unsafe {
@@ -310,8 +320,14 @@ impl App {
         let now = Instant::now();
         let dt = now.duration_since(self.last_frame).as_secs_f32().min(0.25);
         self.last_frame = now;
+        let moving = self.ui.rows_moving();
         self.ui.step(dt);
-        self.present_snakes();
+        // Rows collapse / expand (size changes) or a 30 fps ribbon frame: push the base layer.
+        if moving || self.ui.lines_due() {
+            self.present();
+        } else {
+            self.present_snakes();
+        }
     }
 
     fn set_visible(&mut self, v: bool) {
