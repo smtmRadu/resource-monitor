@@ -1,8 +1,6 @@
-__pycache__/
-*.pyc
+/target
 *.log
-TODOS.md
-vendor/lhm.json
-vendor/lhm.json.tmp
-vendor/PresentMon/pm.csv
-clickthrough.log
+*.log.old
+lhm.json
+lhm.json.tmp
+settings.json
