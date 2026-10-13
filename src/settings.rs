@@ -18,7 +18,7 @@ impl Default for Settings {
 impl Settings {
     pub fn load() -> Self {
         let mut s = Self::default();
-        let Ok(txt) = std::fs::read_to_string(crate::log::home().join("settings.json")) else {
+        let Ok(txt) = std::fs::read_to_string(crate::log::data_dir().join("settings.json")) else {
             return s;
         };
         let Ok(v) = serde_json::from_str::<Value>(&txt) else { return s };
@@ -38,6 +38,6 @@ impl Settings {
 
     pub fn save(&self) {
         let v = json!({ "scale": self.scale, "track": self.track, "display": self.display });
-        let _ = std::fs::write(crate::log::home().join("settings.json"), v.to_string());
+        let _ = std::fs::write(crate::log::data_dir().join("settings.json"), v.to_string());
     }
 }

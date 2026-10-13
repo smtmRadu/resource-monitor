@@ -1,6 +1,6 @@
 [package]
 name = "resource-monitor-rs"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 description = "Always-on-top transparent pill resource monitor for Windows (Rust port)"
 
@@ -8,6 +8,12 @@ description = "Always-on-top transparent pill resource monitor for Windows (Rust
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }
 libloading = "0.9"
 serde_json = "1"
+
+[dev-dependencies]
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd", "png-format"] }
+
+[build-dependencies]
+winresource = "0.1"
 
 [dependencies.windows]
 version = "0.62"
@@ -17,16 +23,20 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinInet",
     "Win32_Networking_WinSock",
     "Win32_Security",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
     "Win32_System_IO",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
     "Win32_System_Performance",
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
+    "Win32_UI_Controls",
     "Win32_UI_HiDpi",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",

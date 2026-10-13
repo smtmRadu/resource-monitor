@@ -1,0 +1,5 @@
+# The updater checks these files by sha256 against what GitHub serves:
+# no line-ending conversion, so the checkout matches the repo bytes.
+dist/** -text
+vendor/** -text
+setup_task.ps1 -text

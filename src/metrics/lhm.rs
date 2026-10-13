@@ -18,7 +18,7 @@ struct Bridge {
 static BRIDGE: Mutex<Bridge> = Mutex::new(Bridge { child: None, last_spawn: None });
 
 fn json_path() -> std::path::PathBuf {
-    crate::log::home().join("lhm.json")
+    crate::log::data_dir().join("lhm.json")
 }
 
 /// Keep the bridge alive while it can produce data; back off 30s between

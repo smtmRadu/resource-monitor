@@ -14,7 +14,7 @@ mod cpu;
 mod disks;
 mod game;
 mod gpu;
-mod jobs;
+pub mod jobs;
 mod lhm;
 mod net;
 mod nvml;

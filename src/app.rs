@@ -9,6 +9,7 @@
 //! Python used a chroma-key window plus Tk bindings that could never fire (the
 //! window was click-through), and "hide to tray" had no way back; here all
 //! controls live in the tray.
+//! `WM_APP_CMD` runs a tray command id posted from another thread (the updater quits the app this way).
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::OnceLock;
@@ -21,6 +22,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_MENU};
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -32,6 +34,9 @@ use crate::ui::Ui;
 const WM_APP_DATA: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
 const WM_APP_FRAME: u32 = WM_APP + 3;
+const WM_APP_CMD: u32 = WM_APP + 4;
+/// From a second launch (Start Menu): show the running monitor.
+const WM_APP_SHOW: u32 = WM_APP + 5;
 const TIMER_TOPMOST: usize = 2;
 const WINDOW_ALPHA: u8 = 237; // 0.93
 
@@ -174,13 +179,19 @@ unsafe fn popup(class: PCWSTR, title: PCWSTR, hinst: HINSTANCE) -> Option<HWND> 
 
 pub fn run() {
     unsafe {
-        // Single instance (the Python version could be started twice).
-        let _mutex = CreateMutexW(None, true, w!("Local\\ResourceMonitorRs"));
-        if GetLastError() == ERROR_ALREADY_EXISTS {
+        // Single instance (the Python version could be started twice). A
+        // non-elevated launch cannot open the elevated instance's mutex
+        // (access denied): that also means one is running.
+        let mutex = CreateMutexW(None, true, w!("Local\\ResourceMonitorRs"));
+        if mutex.is_err() || GetLastError() == ERROR_ALREADY_EXISTS {
+            if let Ok(h) = FindWindowW(w!("ResourceMonitorRs"), PCWSTR::null()) {
+                let _ = PostMessageW(Some(h), WM_APP_SHOW, WPARAM(0), LPARAM(0));
+            }
             return;
         }
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        log(&format!("boot pid={}", std::process::id()));
+        log(&format!("boot pid={} v{}", std::process::id(), crate::update::VERSION));
+        crate::update::cleanup();
 
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
         let main_class = w!("ResourceMonitorRs");
@@ -216,6 +227,7 @@ pub fn run() {
         });
         // Elevated (autostart task): let Explorer's restart broadcast through UIPI.
         let _ = ChangeWindowMessageFilterEx(hwnd, taskbar_created, MSGFLT_ALLOW, None);
+        let _ = ChangeWindowMessageFilterEx(hwnd, WM_APP_SHOW, MSGFLT_ALLOW, None);
         let tray_ok = tray::add(hwnd, WM_APP_TRAY, dpi);
         if !tray_ok {
             log("tray add failed; retrying");
@@ -351,6 +363,10 @@ impl App {
                 self.place();
                 log(&format!("display {}", self.settings.display + 1));
             }
+            tray::ID_VERSION => {
+                crate::update::click(self.main.hwnd, WM_APP_CMD, tray::ID_QUIT);
+                return;
+            }
             tray::ID_QUIT => unsafe {
                 let _ = DestroyWindow(self.snakes.hwnd);
                 let _ = DestroyWindow(self.main.hwnd);
@@ -383,9 +399,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             with_app(|a| a.animate());
             LRESULT(0)
         }
+        WM_APP_SHOW => {
+            with_app(|a| {
+                if !a.visible {
+                    a.set_visible(true);
+                }
+            });
+            LRESULT(0)
+        }
+        WM_APP_CMD => {
+            with_app(|a| a.command(wp.0 as u32));
+            LRESULT(0)
+        }
         WM_TIMER if wp.0 == TIMER_TOPMOST => {
             with_app(|a| {
                 a.raise();
+                crate::update::tick(a.main.hwnd);
                 if !a.tray_ok {
                     // Shell not ready yet at logon: keep trying every 2s.
                     a.tray_ok = tray::add(a.main.hwnd, WM_APP_TRAY, a.dpi);
@@ -411,6 +440,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
             }
             LRESULT(0)
+        }
+        WM_MEASUREITEM => {
+            let mi = &mut *(lp.0 as *mut MEASUREITEMSTRUCT);
+            if mi.CtlType == ODT_MENU && mi.itemID == tray::ID_VERSION {
+                tray::measure(hwnd, mi, &tray::version_label());
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
+        }
+        WM_DRAWITEM => {
+            let di = &*(lp.0 as *const DRAWITEMSTRUCT);
+            if di.CtlType == ODT_MENU && di.itemID == tray::ID_VERSION {
+                tray::draw(di, &tray::version_label(), tray::menu_dpi());
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wp, lp)
         }
         WM_DPICHANGED | WM_DISPLAYCHANGE => {
             with_app(|a| {

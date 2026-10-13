@@ -4,7 +4,30 @@ Always-on-top, click-through, transparent pill monitor for Windows, docked in
 the top-left corner of a display. Written in Rust (a rewrite of the earlier
 Python/Tk version, with its bugs fixed and a fraction of its footprint).
 
+[![Download for Windows](https://img.shields.io/badge/Download-Windows%20installer-2ea44f?style=for-the-badge&logo=windows)](https://github.com/smtmRadu/resource-monitor/raw/main/dist/ResourceMonitor-Setup.exe)
+
 ![Resource Monitor](docs/screenshot.png)
+
+## Install
+1. Download **[ResourceMonitor-Setup.exe](https://github.com/smtmRadu/resource-monitor/raw/main/dist/ResourceMonitor-Setup.exe)** (2 MB) and run it.
+   The installer is not code-signed. If Windows SmartScreen warns, click **More info → Run anyway**.
+2. Pick the install folder (default `C:\Program Files\Resource Monitor`).
+   Keep **Enable on startup** checked to start the monitor at every logon,
+   elevated without a UAC prompt. Elevation enables FPS and the exact CPU sensors.
+
+The installer holds no app build. It downloads the latest one from this repo's
+`main` branch, so it never goes stale. Uninstall it from **Settings → Apps**.
+
+## Updates
+The app checks `main` for a new version 1 minute after start, then every hour.
+When offline, it retries every 10 minutes. It never updates by itself. When a new
+version exists, the tray menu shows it as a green superscript next to the
+current version (e.g. `Version 0.3.0 ↑0.3.1`).
+
+Click the version item to update now. The monitor restarts in a few seconds,
+with a UAC prompt if it is not running elevated. Click it when no arrow shows to
+check immediately. Only changed files are downloaded, and each one is
+hash-checked.
 
 ## What it shows
 One row per module: an **icon pill**, a **metrics pill**, and a 60 s **history
@@ -30,13 +53,16 @@ without hiding the game.
 The window is click-through, so everything lives in the **tray icon**
 (right-click; left-click does nothing):
 
+- **Version** – current version, plus the new one when available; click to check / update
 - **Hide / Show**
 - **Track** – history ribbons on/off
 - **Size** – 1x / 1.5x / 2x
 - **Display** – which monitor it docks on (only with 2+ displays)
 - **Quit**
 
-Choices persist in `settings.json` next to the app. The layout is DPI-aware.
+Choices persist in `%LOCALAPPDATA%\ResourceMonitor\settings.json` (dev builds:
+the repo folder). The layout is DPI-aware. Starting the app again (e.g. from the
+Start Menu) shows a hidden monitor.
 
 ## Build & run
 Requires the Rust toolchain (MSVC). Windows 10/11 only.
@@ -54,11 +80,30 @@ exact LibreHardwareMonitor CPU sensors), from an **elevated** PowerShell:
 ```
 
 Off-screen self-test (no window; renders frames to `<dir>\*.rgba` and timings to
-`selftest.txt`, including synthetic game-mode / scale / track-off frames):
+`selftest.txt`, including synthetic game-mode / scale / track-off frames and the
+tray version item):
 
 ```bat
 target\release\resource-monitor-rs.exe --selftest <dir>
 ```
+
+## Release
+Installed copies update from `dist/` on `main`:
+
+1. Bump `version` in `Cargo.toml`.
+2. Run `.\release.ps1`. It builds the exe into `dist/` and writes
+   `dist/manifest.json` (every app file with its repo path and sha256).
+3. Commit `dist/` (and any changed `vendor/` files) and push to `main`.
+
+`.\release.ps1 -Installer` also rebuilds `dist/ResourceMonitor-Setup.exe` with
+Inno Setup 6 (`installer/setup.iss`). This is needed only when the installer itself
+changes. `.gitattributes` turns off line-ending conversion for the shipped files,
+so the checkout bytes match the manifest hashes.
+
+To test a release before pushing it, serve the repo locally
+(`python -m http.server 8765`) and set `RM_UPDATE_BASE=http://127.0.0.1:8765/`.
+The updater then reads from there. `--update` brings an install folder up to date
+(the installer runs it).
 
 ## Metric sources
 Everything is read in-process with Windows APIs; no admin and no extra apps
@@ -93,7 +138,7 @@ snakes at 60 fps, over 60 s:
 | Memory | **36 MB** working set, 23 MB private (about 16 MB of it is NVIDIA's NVML) | 57 MB + a 56 MB helper process |
 | Disk I/O | 0 KB | log line every second |
 | Threads / GDI objects | 4 / 13 | — |
-| Executable | 800 KB | Python + packages |
+| Executable | 900 KB | Python + packages |
 
 How it stays light:
 - Metrics are sampled once per second on one background thread (~0.2 ms per tick).
@@ -103,6 +148,8 @@ How it stays light:
   when no snake moves or the monitor is hidden.
 - Adapter discovery uses D3DKMT instead of DXGI, which would wake a sleeping
   NVIDIA GPU on hybrid laptops (2 W → 17 W).
+- The update check is one ~13 KB request per hour. Installed files are hashed
+  once, then cached by size and modified time.
 
 ## Fixed vs the Python version
 - iGPU never showed: adapters were told apart by PDH `phys_N`, which is

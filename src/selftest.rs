@@ -3,7 +3,7 @@
 //! Renders frames to raw RGBA files (`<name>_<w>x<h>.rgba`, premultiplied)
 //! without opening a window: one from live metrics, the rest from synthetic
 //! snapshots that exercise every element (temps, fire, iGPU, game/FPS row,
-//! scales, track off). Also writes timing info to selftest.txt.
+//! scales, track off) and the tray version item. Also writes timing info to selftest.txt.
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -113,5 +113,13 @@ pub fn run(dir: &str) {
     }
     let _ = writeln!(report, "anim frame avg {:?}", t.elapsed() / 200);
     metrics::stop();
+
+    // Tray version item (normal + hover), up to date and with an update.
+    for (name, latest) in [("menu_version", None), ("menu_update", Some("\u{2191}9.9.9".to_string()))] {
+        for dpi in [96, 144] {
+            let (w, h, px) = crate::tray::preview(&(format!("Version {}", crate::update::VERSION), latest.clone()), dpi);
+            let _ = std::fs::write(dir.join(format!("{name}{dpi}_{w}x{h}.rgba")), px);
+        }
+    }
     let _ = std::fs::write(dir.join("selftest.txt"), report);
 }
