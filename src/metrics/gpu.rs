@@ -162,6 +162,10 @@ pub fn cpu_vendor() -> Vendor {
 
 /// CPU model, short ("Core Ultra 9 275HX"); empty when unknown.
 pub fn cpu_name() -> String {
+    short_name(&cpu_full_name())
+}
+
+fn cpu_full_name() -> String {
     let mut buf = [0u16; 128];
     let mut len = (buf.len() * 2) as u32;
     let ok = unsafe {
@@ -177,7 +181,17 @@ pub fn cpu_name() -> String {
     }
     .is_ok();
     let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
-    if ok { short_name(&String::from_utf16_lossy(&buf[..n])) } else { String::new() }
+    if ok { String::from_utf16_lossy(&buf[..n]) } else { String::new() }
+}
+
+/// iGPU model, short ("Radeon 780M Graphics"): the adapter's name, else the
+/// CPU name's " w/ ..." / " with ..." suffix; empty when neither exists.
+pub fn igpu_name() -> String {
+    if let Some(a) = adapters().iter().find(|a| a.is_igpu) {
+        return short_name(&a.name);
+    }
+    let cpu = cpu_full_name();
+    [" w/ ", " with "].iter().find_map(|sep| cpu.split_once(sep)).map(|(_, g)| short_name(g)).unwrap_or_default()
 }
 
 /// dGPU model, short ("GeForce RTX 5070 Ti Laptop"); empty without a dGPU.
@@ -189,6 +203,7 @@ pub fn dgpu_name() -> String {
 fn short_name(s: &str) -> String {
     let s = s.split(" @ ").next().unwrap_or(s); // "... CPU @ 2.40GHz"
     let s = s.split(" with ").next().unwrap_or(s); // "... with Radeon Graphics"
+    let s = s.split(" w/ ").next().unwrap_or(s); // "... w/ Radeon 780M Graphics"
     const DROP: &[&str] = &["(R)", "(TM)", "(tm)", "NVIDIA", "AMD", "Intel", "CPU", "GPU", "Processor"];
     s.split_whitespace()
         .map(|w| DROP.iter().fold(w.to_string(), |w, d| w.replace(d, "")))

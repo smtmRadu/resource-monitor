@@ -119,6 +119,7 @@ pub struct Ui {
     snakes: [Snake; 8],
     cpu_name: String,
     gpu_name: String,
+    igpu_name: String,
     /// Per row: 0 = collapsed, 1 = fully shown; eases toward `visible` (linear progress).
     open: [f32; 8],
     icon_boxes: Vec<(usize, BoxF)>,
@@ -199,6 +200,7 @@ impl Ui {
             snakes: [Snake::default(); 8],
             cpu_name: info.cpu_name.clone(),
             gpu_name: info.gpu_name.clone(),
+            igpu_name: info.igpu_name.clone(),
             open: [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0], // iGPU and FPS start hidden
             icon_boxes: Vec::new(),
             stat: Pixmap::new(1, 1).unwrap(),
@@ -558,8 +560,9 @@ impl Ui {
             Glyph::Cpu => {
                 let (m, sub) = (self.v.cpu_main.clone(), self.v.cpu_sub.clone());
                 self.split_text(pix, &m, &sub, tx, ty);
-                let label = if sub.is_empty() { format!("{m} ") } else { format!("{m} {sub}") };
-                let end = self.u(12.0) + self.text.measure(fm, &label) as f32;
+                // Fixed slot sized for the widest text ("100% 200W"): the grid never shifts.
+                let widest = if sub.is_empty() { "100% " } else { "100% 200W" };
+                let end = self.u(12.0) + self.text.measure(fm, widest) as f32;
                 self.minis(pix, vb, end);
                 self.gauge_slot(pix, vb, 0);
             }
@@ -791,8 +794,30 @@ impl Ui {
     /// a head easing from the previous sample to the newest (one sample behind,
     /// so the motion never jumps).
     fn track_lines(&mut self, pix: &mut PixmapMut, g: Glyph, b: BoxF) {
+        // Captions first: the lines draw over them.
+        let (fnum, ty) = (self.font_num(), b.y + self.u(14.0)); // under the 100% line (gy(100) = +5)
+        let (lx0, lx1) = (b.x + self.u(6.0), b.x + b.w - self.u(6.0));
+        let name = match g {
+            Glyph::Cpu => self.cpu_name.clone(),
+            Glyph::Gpu => self.gpu_name.clone(),
+            Glyph::Igpu => self.igpu_name.clone(),
+            _ => String::new(),
+        };
+        self.label(pix, fnum, &name, lx0 + self.u(4.0), ty, TRACK_LBL, Anchor::West);
+        if g == Glyph::Fps && self.v.fps_hz > 0 {
+            let t = format!("{} Hz", self.v.fps_hz);
+            let w = self.text.measure(fnum, &t) as f32;
+            self.label(pix, fnum, &t, lx1 - w - self.u(4.0), ty, TRACK_LBL, Anchor::West);
+        }
+        // Lines span the ribbon edge to edge, clipped to the inside of the contour.
+        let (m, lw) = (self.u(2.0), self.s.round().max(1.0));
+        let (x0, x1) = (b.x + m, b.x + b.w - m);
+        let mut clip = tiny_skia::Mask::new(pix.width(), pix.height());
+        if let (Some(clip), Some(p)) = (clip.as_mut(), draw::rrect(x0 + lw, b.y + m + lw, x1 - x0 - 2.0 * lw, b.h - 2.0 * (m + lw), self.u(PILL_H / 2.0) - lw)) {
+            clip.fill_path(&p, FillRule::Winding, true, Transform::identity());
+        }
+        let clip = clip.as_ref();
         let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
-        let (x0, x1) = (b.x + self.u(6.0), b.x + b.w - self.u(6.0));
         let (step, ph) = ((x1 - x0) / (HIST as f32 - 1.0), self.phase);
         let line = |pix: &mut PixmapMut, vals: &VecDeque<f32>, c: u32| {
             let n = vals.len();
@@ -812,26 +837,13 @@ impl Ui {
                 }
             }
             if let Some(p) = draw::polyline(&pts, false) {
-                pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), None);
+                pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), clip);
             }
         };
         let i = idx(g);
         line(pix, &self.hist[i], self.accent[i]);
         if g == Glyph::Net {
             line(pix, &self.hist[8], 0xc084fc);
-        }
-        // Captions: model name top-left (CPU / GPU), full scale top-right (FPS: refresh rate).
-        let (fnum, ty) = (self.font_num(), b.y + self.u(14.0)); // under the 100% line (gy(100) = +5)
-        let name = match g {
-            Glyph::Cpu => self.cpu_name.clone(),
-            Glyph::Gpu => self.gpu_name.clone(),
-            _ => String::new(),
-        };
-        self.label(pix, fnum, &name, x0 + self.u(4.0), ty, TRACK_LBL, Anchor::West);
-        if g == Glyph::Fps && self.v.fps_hz > 0 {
-            let t = format!("{} Hz", self.v.fps_hz);
-            let w = self.text.measure(fnum, &t) as f32;
-            self.label(pix, fnum, &t, x1 - w - self.u(4.0), ty, TRACK_LBL, Anchor::West);
         }
     }
 

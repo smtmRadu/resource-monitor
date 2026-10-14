@@ -67,9 +67,10 @@ pub struct Info {
     pub cores: usize,
     pub cpu_vendor: Vendor,
     pub gpu_vendor: Vendor,
-    /// Short model names, shown on the CPU / GPU ribbons.
+    /// Short model names, shown on the CPU / GPU / iGPU ribbons.
     pub cpu_name: String,
     pub gpu_name: String,
+    pub igpu_name: String,
 }
 
 static LATEST: Mutex<Option<Snapshot>> = Mutex::new(None);
@@ -87,6 +88,7 @@ pub fn info() -> Info {
         gpu_vendor: gpu::dgpu_vendor(),
         cpu_name: gpu::cpu_name(),
         gpu_name: gpu::dgpu_name(),
+        igpu_name: gpu::igpu_name(),
     }
 }
 
