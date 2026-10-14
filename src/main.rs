@@ -1,7 +1,7 @@
 //! Resource Monitor (Rust port): transparent always-on-top pill monitor, docked upper-left.
 //!
 //! Window is click-through, so every control lives in the tray icon:
-//! right click opens Hide/Show, Track, Size, Display, Update, Quit (left click does nothing).
+//! right click opens Hide/Show, Track, Mode, Size, Display, Update, Quit (left click does nothing).
 #![windows_subsystem = "windows"]
 
 mod app;

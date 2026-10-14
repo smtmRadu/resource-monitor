@@ -69,13 +69,18 @@ The window is click-through, so everything lives in the **tray icon**
 - **Version** – current version, plus the new one when available; click to check / update
 - **Hide / Show**
 - **Track** – history ribbons on/off
+- **Mode** – **Overlayed** (floats over windows) or **Exclusive** (reserves a strip
+  on the display's left edge, like the taskbar: maximized and snapped windows
+  start right of it)
 - **Size** – 1x / 1.5x / 2x
 - **Display** – which monitor it docks on (only with 2+ displays)
 - **Quit**
 
 Choices persist in `%LOCALAPPDATA%\ResourceMonitor\settings.json` (dev builds:
-the repo folder). The layout is DPI-aware. Starting the app again (e.g. from the
-Start Menu) shows a hidden monitor.
+the repo folder) and survive updates. First run: with one display it starts
+Overlayed on it; with 2+ it starts Exclusive on the last one. The layout is
+DPI-aware. Starting the app again (e.g. from the Start Menu) shows a hidden
+monitor.
 
 ## Build & run
 Requires the Rust toolchain (MSVC). Windows 10/11 only.

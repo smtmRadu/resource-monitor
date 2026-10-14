@@ -10,6 +10,10 @@
 //! window was click-through), and "hide to tray" had no way back; here all
 //! controls live in the tray.
 //! `WM_APP_CMD` runs a tray command id posted from another thread (the updater quits the app this way).
+//!
+//! Exclusive mode registers the main window as an AppBar on the display's left
+//! edge (like the taskbar): Windows shrinks the work area, so maximized and
+//! snapped windows start right of the monitor's strip.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::OnceLock;
@@ -24,6 +28,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, MEASUREITEMSTRUCT, ODT_MENU};
 use windows::Win32::UI::HiDpi::*;
+use windows::Win32::UI::Shell::{SHAppBarMessage, ABE_LEFT, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, ABN_POSCHANGED, APPBARDATA};
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::log::log;
@@ -37,6 +42,8 @@ const WM_APP_FRAME: u32 = WM_APP + 3;
 const WM_APP_CMD: u32 = WM_APP + 4;
 /// From a second launch (Start Menu): show the running monitor.
 const WM_APP_SHOW: u32 = WM_APP + 5;
+/// AppBar notifications from the shell (Exclusive mode).
+const WM_APP_BAR: u32 = WM_APP + 6;
 const TIMER_TOPMOST: usize = 2;
 const WINDOW_ALPHA: u8 = 237; // 0.93
 
@@ -122,8 +129,12 @@ struct App {
     ui: Ui,
     settings: Settings,
     dpi: u32,
-    /// Window top-left on the chosen display (10px in from its corner).
+    /// Chosen display's full rect.
+    monitor: RECT,
+    /// Window top-left on the chosen display (10px in from its corner, or from the strip's).
     origin: POINT,
+    /// Strip reserved as an AppBar (Exclusive mode); None while overlayed or hidden.
+    bar: Option<RECT>,
     displays: usize,
     visible: bool,
     last_frame: Instant,
@@ -214,8 +225,8 @@ pub fn run() {
             log("CreateWindowExW failed");
             return;
         };
-        let settings = Settings::load();
-        let (origin, dpi, displays) = placement(settings.display);
+        let settings = Settings::load(monitors().len());
+        let (monitor, dpi, displays) = placement(settings.display);
         let info = crate::metrics::info();
         let ui = Ui::new(info, settings.scale * dpi as f32 / 96.0, settings.track);
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
@@ -226,7 +237,9 @@ pub fn run() {
                 ui,
                 settings,
                 dpi,
-                origin,
+                monitor,
+                origin: POINT::default(),
+                bar: None,
                 displays,
                 visible: true,
                 last_frame: Instant::now(),
@@ -238,6 +251,7 @@ pub fn run() {
         // Elevated (autostart task): let Explorer's restart broadcast through UIPI.
         let _ = ChangeWindowMessageFilterEx(hwnd, taskbar_created, MSGFLT_ALLOW, None);
         let _ = ChangeWindowMessageFilterEx(hwnd, WM_APP_SHOW, MSGFLT_ALLOW, None);
+        let _ = ChangeWindowMessageFilterEx(hwnd, WM_APP_BAR, MSGFLT_ALLOW, None);
         let tray_ok = tray::add(hwnd, WM_APP_TRAY, dpi);
         if !tray_ok {
             log("tray add failed; retrying");
@@ -245,7 +259,10 @@ pub fn run() {
         with_app(|a| a.tray_ok = tray_ok);
         PACER_HWND.store(hwnd.0 as isize, Ordering::Release);
         let _ = PACER.set(std::thread::Builder::new().name("pacer".into()).spawn(pacer).expect("pacer thread").thread().clone());
-        with_app(|a| a.present());
+        with_app(|a| {
+            a.place(); // origin, and the strip in Exclusive mode
+            a.present();
+        });
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         let _ = ShowWindow(snake_hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_TOPMOST, 2000, None);
@@ -267,16 +284,60 @@ impl App {
         self.settings.scale * self.dpi as f32 / 96.0
     }
 
-    /// Re-resolve the chosen display (monitors come and go) and its DPI.
+    /// Re-resolve the chosen display (monitors come and go), its DPI, the
+    /// Exclusive strip and the window origin.
     fn place(&mut self) {
-        let (origin, dpi, displays) = placement(self.settings.display);
-        self.origin = origin;
+        let (monitor, dpi, displays) = placement(self.settings.display);
+        self.monitor = monitor;
         self.displays = displays;
         if dpi != self.dpi {
             self.dpi = dpi;
             self.ui.set_scale(self.scale());
         }
+        self.sync_bar();
+        let off = (10 * self.dpi / 96) as i32;
+        let r = self.bar.unwrap_or(self.monitor);
+        self.origin = POINT { x: r.left + off, y: r.top + off };
         self.ui.invalidate();
+    }
+
+    /// Exclusive and visible: reserve a strip as wide as the monitor plus its
+    /// margins on the display's left edge (the shell moves it right of a
+    /// left-docked taskbar). Otherwise release it.
+    fn sync_bar(&mut self) {
+        let mut abd = APPBARDATA {
+            cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+            hWnd: self.main.hwnd,
+            uCallbackMessage: WM_APP_BAR,
+            uEdge: ABE_LEFT,
+            ..Default::default()
+        };
+        unsafe {
+            if !(self.settings.exclusive && self.visible) {
+                if self.bar.take().is_some() {
+                    SHAppBarMessage(ABM_REMOVE, &mut abd);
+                    log("strip released");
+                }
+                return;
+            }
+            // Fails while the shell is not up yet (logon): the topmost timer retries.
+            if self.bar.is_none() && SHAppBarMessage(ABM_NEW, &mut abd) == 0 {
+                return;
+            }
+            let w = self.ui.size().0 as i32 + 2 * (10 * self.dpi / 96) as i32;
+            abd.rc = self.monitor;
+            abd.rc.right = abd.rc.left + w;
+            SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+            abd.rc.right = abd.rc.left + w;
+            // Unchanged: no SETPOS, so our own position change cannot loop back as ABN_POSCHANGED.
+            if self.bar == Some(abd.rc) {
+                return;
+            }
+            SHAppBarMessage(ABM_SETPOS, &mut abd);
+            let r = abd.rc;
+            log(&format!("strip reserved {},{} {}x{}", r.left, r.top, r.right - r.left, r.bottom - r.top));
+            self.bar = Some(r);
+        }
     }
 
     /// Push both layers (after data, layout or settings changes).
@@ -333,8 +394,9 @@ impl App {
     fn set_visible(&mut self, v: bool) {
         self.visible = v;
         let cmd = if v { SW_SHOWNOACTIVATE } else { SW_HIDE };
+        // Hidden: the Exclusive strip is released (nothing to show in it).
+        self.place();
         if v {
-            self.ui.invalidate();
             self.present();
         }
         unsafe {
@@ -372,7 +434,13 @@ impl App {
                     _ => 2.0,
                 };
                 self.ui.set_scale(self.scale());
+                self.place(); // the Exclusive strip follows the width
                 log(&format!("scale {}x", self.settings.scale));
+            }
+            tray::ID_OVERLAYED | tray::ID_EXCLUSIVE => {
+                self.settings.exclusive = id == tray::ID_EXCLUSIVE;
+                self.place();
+                log(if self.settings.exclusive { "mode exclusive" } else { "mode overlayed" });
             }
             id if (tray::ID_DISPLAY..tray::ID_DISPLAY + 16).contains(&id) => {
                 self.settings.display = (id - tray::ID_DISPLAY) as usize;
@@ -435,6 +503,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     // Shell not ready yet at logon: keep trying every 2s.
                     a.tray_ok = tray::add(a.main.hwnd, WM_APP_TRAY, a.dpi);
                 }
+                if a.settings.exclusive && a.visible && a.bar.is_none() {
+                    a.place();
+                    a.present();
+                }
             });
             LRESULT(0)
         }
@@ -449,6 +521,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     scale: a.settings.scale,
                     display: if a.settings.display < a.displays { a.settings.display } else { 0 },
                     displays: a.displays,
+                    exclusive: a.settings.exclusive,
                 });
                 if let Some(st) = st {
                     let id = tray::menu(hwnd, &st);
@@ -480,15 +553,34 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             });
             DefWindowProcW(hwnd, msg, wp, lp)
         }
+        WM_APP_BAR => {
+            // Taskbar moved / resized, or another AppBar on the same edge changed.
+            if wp.0 as u32 == ABN_POSCHANGED {
+                with_app(|a| {
+                    a.place();
+                    a.present();
+                });
+            }
+            LRESULT(0)
+        }
         WM_DESTROY => {
+            // Give the strip back (no-op when overlayed). The App is borrowed
+            // here (Quit runs inside a command), so call the shell directly.
+            let mut abd = APPBARDATA { cbSize: std::mem::size_of::<APPBARDATA>() as u32, hWnd: hwnd, ..Default::default() };
+            SHAppBarMessage(ABM_REMOVE, &mut abd);
             PostQuitMessage(0);
             LRESULT(0)
         }
         _ => {
             let tc = with_app(|a| a.taskbar_created).unwrap_or(0);
             if tc != 0 && msg == tc {
-                // Explorer restarted: the tray icon is gone, add it back.
-                with_app(|a| a.tray_ok = tray::add(hwnd, WM_APP_TRAY, a.dpi));
+                // Explorer restarted: the tray icon and the AppBar are gone, add them back.
+                with_app(|a| {
+                    a.tray_ok = tray::add(hwnd, WM_APP_TRAY, a.dpi);
+                    a.bar = None;
+                    a.place();
+                    a.present();
+                });
                 return LRESULT(0);
             }
             DefWindowProcW(hwnd, msg, wp, lp)
@@ -516,12 +608,11 @@ fn monitors() -> Vec<(RECT, u32, bool)> {
     v
 }
 
-/// Window origin + DPI for display `index` (falls back to primary when it is gone).
-fn placement(index: usize) -> (POINT, u32, usize) {
+/// Rect + DPI of display `index` (falls back to primary when it is gone), and the display count.
+fn placement(index: usize) -> (RECT, u32, usize) {
     let mons = monitors();
     let Some(&(r, dpi, _)) = mons.get(index).or(mons.first()) else {
-        return (POINT { x: 10, y: 10 }, 96, 1);
+        return (RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, 96, 1);
     };
-    let off = (10 * dpi / 96) as i32;
-    (POINT { x: r.left + off, y: r.top + off }, dpi, mons.len())
+    (r, dpi, mons.len())
 }

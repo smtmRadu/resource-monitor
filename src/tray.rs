@@ -19,6 +19,8 @@ use crate::draw::{self, col};
 pub const ID_TOGGLE: u32 = 1;
 pub const ID_TRACK: u32 = 3;
 pub const ID_VERSION: u32 = 5;
+pub const ID_OVERLAYED: u32 = 6;
+pub const ID_EXCLUSIVE: u32 = 7;
 pub const ID_SIZE_1: u32 = 10;
 pub const ID_SIZE_15: u32 = 11;
 pub const ID_SIZE_2: u32 = 12;
@@ -31,6 +33,7 @@ pub struct MenuState {
     pub scale: f32,
     pub display: usize,
     pub displays: usize,
+    pub exclusive: bool,
 }
 
 /// CPU chip fused with the FPS sweep (line-icon style, like the pills).
@@ -170,6 +173,7 @@ pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
     unsafe {
         let Ok(m) = CreatePopupMenu() else { return 0 };
         let Ok(size) = CreatePopupMenu() else { return 0 };
+        let Ok(mode) = CreatePopupMenu() else { return 0 };
         let item = |menu: HMENU, id: u32, text: &str, checked: bool| {
             let w = wide(text);
             let flags = MF_STRING | if checked { MF_CHECKED } else { MF_UNCHECKED };
@@ -179,6 +183,10 @@ pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         item(m, ID_TOGGLE, if st.visible { "Hide" } else { "Show" }, false);
         item(m, ID_TRACK, "Track", st.track);
+        item(mode, ID_OVERLAYED, "Overlayed", !st.exclusive);
+        item(mode, ID_EXCLUSIVE, "Exclusive", st.exclusive);
+        let w = wide("Mode");
+        let _ = AppendMenuW(m, MF_POPUP, mode.0 as usize, PCWSTR(w.as_ptr()));
         item(size, ID_SIZE_1, "1x", st.scale == 1.0);
         item(size, ID_SIZE_15, "1.5x", st.scale == 1.5);
         item(size, ID_SIZE_2, "2x", st.scale == 2.0);
