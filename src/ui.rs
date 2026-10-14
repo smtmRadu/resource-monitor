@@ -715,7 +715,7 @@ impl Ui {
         if let Some(p) = draw::arc_path(cx, cy, r, r, 0.0, 360.0) {
             pix.stroke_path(&p, &draw::paint(col(0x39404e)), &draw::stroke(w, LineCap::Butt), Transform::identity(), None);
         }
-        let frac = ((raw - 40.0) / 59.0).clamp(0.0, 1.0);
+        let frac = ((raw - 30.0) / 69.0).clamp(0.0, 1.0); // 30°C empty .. 99°C full
         if frac > 0.0 {
             // from 12 o'clock, clockwise
             if let Some(p) = draw::arc_path(cx, cy, r, r, 90.0, -frac * 360.0) {
