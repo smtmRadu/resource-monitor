@@ -41,12 +41,12 @@ ribbon**. A "snake" runs around each icon pill; its length is the live value.
 | VRAM | used %, used / total GB | VRAM used |
 | iGPU | load % (row appears on activity, hides after 5 s at 0%) | iGPU load |
 | DISK | transfer MB/s + a storage bar per drive (color = physical disk; red under 10% free, like Explorer) | storage used, all drives |
-| ETH | download / upload MB/s | — |
+| ETH | download / upload MB/s | two snakes on opposite sides (download blue, upload purple), each up to half the pill at 100 MB/s |
 | FPS | game name + FPS, yellow above the refresh rate (row appears only while a game runs) | FPS / refresh rate of the game's monitor |
 
-Temperature rings fill from 40 °C to 99 °C; above 99 °C they show a flame. They
+Temperature rings fill from 30 °C to 99 °C; above 99 °C they show a flame. They
 ease to each new reading (arc, color and number together). Other values
-crossfade over 0.3 s. The history ribbons scroll smoothly; the CPU and GPU
+crossfade over 0.3 s. The history ribbons scroll smoothly, with a fill under each line that fades toward 0%; the CPU and GPU
 ribbons name the model, and the FPS ribbon shows its full scale (the refresh
 rate; a faster game stays capped at the top line, the number shows the real FPS).
 Rows that appear or hide (iGPU, FPS) collapse and expand smoothly.

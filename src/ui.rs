@@ -6,7 +6,7 @@
 //! snakes live in a separate, narrow `overlay` layer redrawn every frame.
 use std::collections::VecDeque;
 
-use tiny_skia::{FillRule, LineCap, Pixmap, PixmapMut, Transform};
+use tiny_skia::{FillRule, GradientStop, LineCap, LinearGradient, Pixmap, PixmapMut, Point, SpreadMode, Transform};
 
 use crate::draw::{self, col, col_a, Glyph, MUTED, PILL, RED, TXT, WATT};
 use crate::metrics::{Drive, Info, Snapshot, Vendor};
@@ -29,6 +29,8 @@ const LINES_FPS: f32 = 30.0; // ribbon scroll redraw rate (slow motion; more buy
 /// Ribbon grid lines and the contours drawn in the same color.
 const GRID: u32 = 0x232833;
 const TRACK_LBL: u32 = 0x5c6370; // ribbon captions (model names, Hz): quieter than MUTED
+const NET_UP: u32 = 0xc084fc; // upload: arrow, ribbon line, snake
+const NET_MAX_MBS: f32 = 100.0; // ETH snakes reach full length (half the perimeter each) here
 /// Explorer's "low space" rule: red bar once a drive is over 90% full.
 const LOW_SPACE_USED: f32 = 0.90;
 const BG_NORMAL: f32 = 1.0;
@@ -116,7 +118,7 @@ pub struct Ui {
     fps_shown: bool,
     v: Values,
     hist: [VecDeque<f32>; 9], // ROWS order + net upload at 8
-    snakes: [Snake; 8],
+    snakes: [Snake; 9], // ROWS order + net upload at 8
     cpu_name: String,
     gpu_name: String,
     igpu_name: String,
@@ -197,7 +199,7 @@ impl Ui {
                 fps_hz: 0,
             },
             hist: Default::default(),
-            snakes: [Snake::default(); 8],
+            snakes: [Snake::default(); 9],
             cpu_name: info.cpu_name.clone(),
             gpu_name: info.gpu_name.clone(),
             igpu_name: info.igpu_name.clone(),
@@ -360,6 +362,9 @@ impl Ui {
                 self.snakes[i].target = (t / 100.0).clamp(0.0, 1.0);
             }
         }
+        // ETH: download + upload snakes, each up to half the perimeter at NET_MAX_MBS.
+        self.snakes[idx(Glyph::Net)].target = (s.net_down / NET_MAX_MBS).clamp(0.0, 1.0) * 0.5;
+        self.snakes[8].target = (s.net_up / NET_MAX_MBS).clamp(0.0, 1.0) * 0.5;
         let mut push = |i: usize, x: Option<f32>| {
             if let Some(x) = x {
                 let h = &mut self.hist[i];
@@ -747,7 +752,7 @@ impl Ui {
         let y = b.y + b.h / 2.0;
         let (dx, ux) = (b.x + (10.0 * s).floor(), b.x + (64.0 * s).floor());
         let down = col(self.accent[idx(Glyph::Net)]);
-        let up = col(0xc084fc);
+        let up = col(NET_UP);
         // Stroked arrow (shaft + chevron), as tall as the digits next to it.
         let arrow = |pix: &mut PixmapMut, x: f32, dir: f32, c| {
             let (h, w) = (5.0 * s, 3.5 * s); // half height, chevron half width
@@ -836,6 +841,23 @@ impl Ui {
                     pts[0] = (x0, ay + (by - ay) * t);
                 }
             }
+            // Area under the line: the line color fading out toward the 0% line.
+            let mut area = pts.clone();
+            area.extend([(x1, b.y + b.h), (pts[0].0, b.y + b.h)]);
+            // Fade from the line's highest point, so low lines get a visible fill too.
+            let top = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).min(gy(0.0) - 1.0);
+            let shade = LinearGradient::new(
+                Point::from_xy(0.0, top),
+                Point::from_xy(0.0, gy(0.0)),
+                vec![GradientStop::new(0.0, col_a(c, 0.30)), GradientStop::new(1.0, col_a(c, 0.0))],
+                SpreadMode::Pad,
+                Transform::identity(),
+            );
+            if let (Some(p), Some(shader)) = (draw::polyline(&area, true), shade) {
+                let mut paint = draw::paint(col(c));
+                paint.shader = shader;
+                pix.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), clip);
+            }
             if let Some(p) = draw::polyline(&pts, false) {
                 pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), clip);
             }
@@ -843,7 +865,7 @@ impl Ui {
         let i = idx(g);
         line(pix, &self.hist[i], self.accent[i]);
         if g == Glyph::Net {
-            line(pix, &self.hist[8], 0xc084fc);
+            line(pix, &self.hist[8], NET_UP);
         }
     }
 
@@ -899,11 +921,13 @@ impl Ui {
 
     /// True while some visible snake moves (rotating segment or easing length).
     pub fn animating(&self) -> bool {
-        self.lines_moving() || self.rows_moving() || self.icon_boxes.iter().any(|&(i, _)| {
-            let s = self.snakes[i];
+        let moving = |s: Snake| {
             let full = s.len > 0.985 && s.target > 0.985;
             (s.len >= 0.01 && !full) || (s.target - s.len).abs() > 0.002
-        })
+        };
+        self.lines_moving()
+            || self.rows_moving()
+            || self.icon_boxes.iter().any(|&(i, _)| moving(self.snakes[i]) || (ROWS[i] == Glyph::Net && moving(self.snakes[8])))
     }
 
     /// Static layer (capsules, text, gauges, ribbons), re-rendered only when dirty.
@@ -918,7 +942,7 @@ impl Ui {
     }
 
     fn snake_rows(&self) -> impl Iterator<Item = (usize, BoxF)> + '_ {
-        self.icon_boxes.iter().copied().filter(|&(i, _)| ROWS[i] != Glyph::Net)
+        self.icon_boxes.iter().copied()
     }
 
     /// Snake layer: transparent except the snakes; spans only the icon column
@@ -945,7 +969,17 @@ impl Ui {
     }
 
     fn snake(&self, pix: &mut PixmapMut, i: usize, b: BoxF) {
-        let sn = self.snakes[i];
+        if ROWS[i] == Glyph::Net {
+            // Download and upload run on opposite sides of the capsule.
+            self.snake_seg(pix, self.snakes[i], 0.0, self.accent[i], b);
+            self.snake_seg(pix, self.snakes[8], 0.5, NET_UP, b);
+        } else {
+            self.snake_seg(pix, self.snakes[i], 0.0, self.accent[i], b);
+        }
+    }
+
+    /// One snake around box `b`; `off` shifts its head along the perimeter (fraction).
+    fn snake_seg(&self, pix: &mut PixmapMut, sn: Snake, off: f32, c: u32, b: BoxF) {
         if sn.len < 0.01 {
             return;
         }
@@ -971,11 +1005,10 @@ impl Ui {
             }
         };
         let full = sn.len > 0.985 && sn.target > 0.985;
-        let (start, len) = if full { (0.0, total) } else { (sn.head * total - sn.len.max(6.0 / 280.0) * total, sn.len.max(6.0 / 280.0) * total) };
+        let (start, len) = if full { (0.0, total) } else { ((sn.head + off) * total - sn.len.max(6.0 / 280.0) * total, sn.len.max(6.0 / 280.0) * total) };
         let n = (len / self.u(3.0)).ceil().max(2.0) as usize;
         let pts: Vec<(f32, f32)> = (0..=n).map(|k| at(start + len * k as f32 / n as f32)).collect();
         if let Some(p) = draw::polyline(&pts, full) {
-            let c = self.accent[i];
             let bgr = ((c & 0xff) << 16) | (c & 0xff00) | ((c >> 16) & 0xff);
             pix.stroke_path(&p, &draw::paint(col(bgr)), &draw::stroke(self.u(2.0), LineCap::Butt), Transform::identity(), None);
         }
