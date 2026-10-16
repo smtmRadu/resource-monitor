@@ -118,3 +118,28 @@ impl Disks {
         self.drives.clone()
     }
 }
+
+/// Fallback DISK snake full scale when WinSAT has no disk score.
+const DEFAULT_MAX_MBS: f32 = 512.0;
+
+/// System disk's max transfer speed (MB/s): the sequential read throughput of
+/// Windows' own WinSAT assessment (run at setup; small XML files, read once at
+/// start). 512 MB/s when no assessment exists.
+pub fn max_mbs() -> f32 {
+    let dir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into()) + r"\Performance\WinSAT\DataStore";
+    let Ok(rd) = std::fs::read_dir(dir) else { return DEFAULT_MAX_MBS };
+    // File names start with a timestamp: newest last.
+    let mut files: Vec<_> = rd.flatten().map(|e| e.path()).filter(|p| p.to_string_lossy().ends_with(".WinSAT.xml")).collect();
+    files.sort();
+    files.iter().rev().find_map(|p| seq_read(&std::fs::read(p).ok()?)).unwrap_or(DEFAULT_MAX_MBS)
+}
+
+/// `<AvgThroughput kind="Sequential Read" ...>6416.27</AvgThroughput>` from a UTF-16LE WinSAT XML.
+fn seq_read(bytes: &[u8]) -> Option<f32> {
+    let utf16: Vec<u16> = bytes.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    let xml = String::from_utf16_lossy(&utf16);
+    let rest = &xml[xml.find("<AvgThroughput kind=\"Sequential Read\"")?..];
+    let start = rest.find('>')? + 1;
+    let end = start + rest[start..].find('<')?;
+    rest[start..end].trim().parse::<f32>().ok().filter(|&v| v > 0.0)
+}

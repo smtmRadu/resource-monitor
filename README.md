@@ -40,7 +40,7 @@ ribbon**. A "snake" runs around each icon pill; its length is the live value.
 | GPU | load %, watts / power limit, temperature ring | GPU load |
 | VRAM | used %, used / total GB | VRAM used |
 | iGPU | load % (row appears on activity, hides after 5 s at 0%) | iGPU load |
-| DISK | transfer MB/s + a storage bar per drive (color = physical disk; red under 10% free, like Explorer) | storage used, all drives |
+| DISK | transfer MB/s + a storage bar per drive (color = physical disk; red under 10% free, like Explorer) | transfer speed on a log2(MB/s + 1) scale, full at the system disk's max speed (WinSAT sequential read, else 512 MB/s) |
 | ETH | download / upload MB/s | two snakes on opposite sides (download blue, upload purple), each up to half the pill at 100 MB/s |
 | FPS | game name + FPS, yellow above the refresh rate (row appears only while a game runs) | FPS / refresh rate of the game's monitor |
 
@@ -72,7 +72,7 @@ The window is click-through, so everything lives in the **tray icon**
 - **Mode** – **Overlayed** (floats over windows) or **Exclusive** (reserves a strip
   on the display's left edge, like the taskbar: maximized and snapped windows
   start right of it)
-- **Size** – 1x / 1.5x / 2x
+- **Size** – 0.75x / 1x (default) / 1.25x
 - **Display** – which monitor it docks on (only with 2+ displays)
 - **Quit**
 
@@ -146,17 +146,19 @@ Helper processes run in a kill-on-close job object, so they never outlive the
 monitor.
 
 ## Footprint
-Measured with v0.3.1 on a Core Ultra 9 275HX + RTX 5070 Ti Laptop (24 threads),
-1x, all rows and animations, elevated (FPS + LHM sensors), over 60 s:
+Measured with v0.3.5 (installed, started by the autostart task) on a Core Ultra 9 275HX +
+RTX 5070 Ti Laptop (24 threads), 1x, all rows and animations, elevated (FPS + LHM sensors),
+over 60 s, 2 minutes after start:
 
 | | |
 |---|---|
-| CPU | **2.9% of one core** (0.12% of the whole CPU) |
+| CPU | **3.5–4.2% of one core** (under 0.2% of the whole CPU; varies with system load), peak 7.7% |
 | GPU | 0% |
-| Memory | **55 MB** working set, 35 MB private (NVIDIA's NVML is a good part of it) |
-| Disk I/O | 0 KB |
-| Threads / GDI objects | 14 / 13 |
-| Executable | 900 KB |
+| Memory | **59 MB** working set, 35 MB private (Windows trims an idle process's working set over time) |
+| Disk I/O | ~0 KB/s (56 B/s) |
+| Threads / GDI objects | 7 / 13 |
+| Executable | 950 KB |
+| LHM bridge (child process) | 0.3% of one core, 24 MB private |
 
 How it stays light:
 - Metrics are sampled once per second on one background thread (~0.2 ms per tick).
@@ -171,25 +173,3 @@ How it stays light:
   NVIDIA GPU on hybrid laptops (2 W → 17 W).
 - The update check is one ~13 KB request per hour. Installed files are hashed
   once, then cached by size and modified time.
-
-## Fixed vs the Python version
-- iGPU never showed: adapters were told apart by PDH `phys_N`, which is
-  `phys_0` for both GPUs on hybrid laptops. Now per adapter LUID, using the
-  busiest engine (no >100% overshoot).
-- CPU temperature never read on AMD (the bridge only knew Intel's "Package"
-  sensor) and never without admin. Now the ACPI thermal zone + RAPL, no admin.
-- Dead controls: double-click / C / H / right-click bindings could never fire on
-  a click-through window, and "hide to tray" had no way back.
-- Rows reordered after toggling (the iGPU row came back under ETH; Track off/on
-  moved every ribbon to the end).
-- Game mode removed the pill backgrounds entirely instead of fading them.
-- Fullscreen browsers / video players and maximized windows counted as games.
-- FPS froze on its last value when a game stopped presenting frames, and mixed
-  in launcher / overlay swap chains.
-- Network double-counted WSL / Hyper-V virtual adapter traffic and spiked when
-  an adapter reconnected.
-- `app.log` grew by a line every second forever.
-- The helper respawned every second when it could not run, and helpers were
-  left running after the monitor was killed.
-- Several instances could run at once; blurry on scaled displays; the autostart
-  script had hardcoded user paths.

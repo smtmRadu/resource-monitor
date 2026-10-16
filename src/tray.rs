@@ -21,9 +21,9 @@ pub const ID_TRACK: u32 = 3;
 pub const ID_VERSION: u32 = 5;
 pub const ID_OVERLAYED: u32 = 6;
 pub const ID_EXCLUSIVE: u32 = 7;
-pub const ID_SIZE_1: u32 = 10;
-pub const ID_SIZE_15: u32 = 11;
-pub const ID_SIZE_2: u32 = 12;
+pub const ID_SIZE_075: u32 = 10;
+pub const ID_SIZE_1: u32 = 11;
+pub const ID_SIZE_125: u32 = 12;
 pub const ID_DISPLAY: u32 = 20; // + index
 pub const ID_QUIT: u32 = 99;
 
@@ -187,9 +187,9 @@ pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
         item(mode, ID_EXCLUSIVE, "Exclusive", st.exclusive);
         let w = wide("Mode");
         let _ = AppendMenuW(m, MF_POPUP, mode.0 as usize, PCWSTR(w.as_ptr()));
+        item(size, ID_SIZE_075, "0.75x", st.scale == 0.75);
         item(size, ID_SIZE_1, "1x", st.scale == 1.0);
-        item(size, ID_SIZE_15, "1.5x", st.scale == 1.5);
-        item(size, ID_SIZE_2, "2x", st.scale == 2.0);
+        item(size, ID_SIZE_125, "1.25x", st.scale == 1.25);
         let w = wide("Size");
         let _ = AppendMenuW(m, MF_POPUP, size.0 as usize, PCWSTR(w.as_ptr()));
         if st.displays > 1 {

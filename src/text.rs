@@ -189,7 +189,8 @@ impl Text {
             Anchor::Center => x.round() as i32 - tw / 2,
         } - pad;
         let top = (yc - mid).round() as i32;
-        let (fr, fg, fb) = ((color >> 16) & 255, (color >> 8) & 255, color & 255);
+        // Targets are BGRA (the window DIB's order), like the GDI coverage bitmap.
+        let (fb, fg, fr) = (color & 255, (color >> 8) & 255, (color >> 16) & 255);
         let (pw, ph) = (pix.width() as i32, pix.height() as i32);
         let data = pix.data_mut();
         for yy in 0..hh {
@@ -211,16 +212,16 @@ impl Text {
                 let d = &mut data[di..di + 4];
                 if d[3] == 255 {
                     // Opaque backdrop: per-channel ClearType blend.
-                    d[0] = ((fr * cr + d[0] as u32 * (255 - cr)) / 255) as u8;
+                    d[0] = ((fb * cb + d[0] as u32 * (255 - cb)) / 255) as u8;
                     d[1] = ((fg * cg + d[1] as u32 * (255 - cg)) / 255) as u8;
-                    d[2] = ((fb * cb + d[2] as u32 * (255 - cb)) / 255) as u8;
+                    d[2] = ((fr * cr + d[2] as u32 * (255 - cr)) / 255) as u8;
                 } else {
                     // Translucent backdrop (game mode): grayscale src-over, premultiplied.
                     let a = (cr + cg + cb) / 3;
                     let inv = 255 - a;
-                    d[0] = ((fr * a + d[0] as u32 * inv) / 255) as u8;
+                    d[0] = ((fb * a + d[0] as u32 * inv) / 255) as u8;
                     d[1] = ((fg * a + d[1] as u32 * inv) / 255) as u8;
-                    d[2] = ((fb * a + d[2] as u32 * inv) / 255) as u8;
+                    d[2] = ((fr * a + d[2] as u32 * inv) / 255) as u8;
                     d[3] = (a + d[3] as u32 * inv / 255) as u8;
                 }
             }

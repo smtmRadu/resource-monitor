@@ -1,10 +1,10 @@
 {
-    "version":  "0.3.4",
+    "version":  "0.3.5",
     "files":  [
                   {
                       "path":  "resource-monitor-rs.exe",
                       "src":  "dist/resource-monitor-rs.exe",
-                      "sha256":  "8c6bb87f9816eb48dcd82ca719c1b461ca749c37ae2feb1d587904421d690909"
+                      "sha256":  "a2954619c7ec2510efdc64bcb391c7e1fd79586db221636631f35e435540481c"
                   },
                   {
                       "path":  "setup_task.ps1",

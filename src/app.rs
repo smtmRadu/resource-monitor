@@ -99,21 +99,13 @@ impl Layer {
         true
     }
 
-    /// Copy `pix` (premultiplied; RGBA, or BGRA when `bgra`) into the DIB and update the window.
-    fn push(&mut self, pix: &Pixmap, at: POINT, bgra: bool) {
+    /// Copy `pix` (premultiplied BGRA, the DIB's order) into the DIB and update the window.
+    fn push(&mut self, pix: &Pixmap, at: POINT) {
         if !self.ensure(pix.width(), pix.height()) {
             return;
         }
-        let n = (self.w * self.h) as usize;
-        let dst = unsafe { std::slice::from_raw_parts_mut(self.bits as *mut [u8; 4], n) };
-        let src = pix.data().as_chunks::<4>().0;
-        if bgra {
-            dst.copy_from_slice(src);
-        } else {
-            for (d, p) in dst.iter_mut().zip(src) {
-                *d = [p[2], p[1], p[0], p[3]];
-            }
-        }
+        let n = (self.w * self.h * 4) as usize;
+        unsafe { std::slice::from_raw_parts_mut(self.bits, n) }.copy_from_slice(pix.data());
         let size = SIZE { cx: self.w as i32, cy: self.h as i32 };
         let src = POINT::default();
         let blend = BLENDFUNCTION { BlendOp: AC_SRC_OVER as u8, BlendFlags: 0, SourceConstantAlpha: WINDOW_ALPHA, AlphaFormat: AC_SRC_ALPHA as u8 };
@@ -228,6 +220,7 @@ pub fn run() {
         let settings = Settings::load(monitors().len());
         let (monitor, dpi, displays) = placement(settings.display);
         let info = crate::metrics::info();
+        log(&format!("disk max {:.0} MB/s", info.disk_max_mbs));
         let ui = Ui::new(info, settings.scale * dpi as f32 / 96.0, settings.track);
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         APP.with(|a| {
@@ -346,7 +339,7 @@ impl App {
             return;
         }
         let at = self.origin;
-        self.main.push(self.ui.base(), at, false);
+        self.main.push(self.ui.base(), at);
         self.present_snakes();
     }
 
@@ -356,7 +349,7 @@ impl App {
             return;
         }
         let at = self.origin;
-        self.snakes.push(self.ui.overlay(), at, true);
+        self.snakes.push(self.ui.overlay(), at);
         self.sync_anim();
     }
 
@@ -427,11 +420,11 @@ impl App {
                 self.ui.track = self.settings.track;
                 self.ui.invalidate();
             }
-            tray::ID_SIZE_1 | tray::ID_SIZE_15 | tray::ID_SIZE_2 => {
+            tray::ID_SIZE_075 | tray::ID_SIZE_1 | tray::ID_SIZE_125 => {
                 self.settings.scale = match id {
+                    tray::ID_SIZE_075 => 0.75,
                     tray::ID_SIZE_1 => 1.0,
-                    tray::ID_SIZE_15 => 1.5,
-                    _ => 2.0,
+                    _ => 1.25,
                 };
                 self.ui.set_scale(self.scale());
                 self.place(); // the Exclusive strip follows the width

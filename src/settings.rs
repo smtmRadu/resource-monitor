@@ -36,7 +36,7 @@ impl Settings {
         };
         let Ok(v) = serde_json::from_str::<Value>(&txt) else { return s };
         if let Some(x) = v.get("scale").and_then(Value::as_f64) {
-            if [1.0, 1.5, 2.0].contains(&x) {
+            if [0.75, 1.0, 1.25].contains(&x) {
                 s.scale = x as f32;
             }
         }

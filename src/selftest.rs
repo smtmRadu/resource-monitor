@@ -17,11 +17,11 @@ fn save(ui: &mut Ui, dir: &Path, name: &str, report: &mut String) {
     let t = Instant::now();
     ui.invalidate();
     let mut f = ui.base().clone();
-    let mut ov = ui.overlay().clone();
-    for px in ov.data_mut().as_chunks_mut::<4>().0 {
-        px.swap(0, 2); // overlay is BGRA
-    }
+    let ov = ui.overlay().clone();
     f.draw_pixmap(0, 0, ov.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+    for px in f.data_mut().as_chunks_mut::<4>().0 {
+        px.swap(0, 2); // layers are BGRA; the dump is RGBA
+    }
     let el = t.elapsed();
     let path = dir.join(format!("{name}_{}x{}.rgba", f.width(), f.height()));
     let _ = std::fs::write(path, f.data());
@@ -109,10 +109,10 @@ pub fn run(dir: &str) {
     save(&mut ui, dir, "notrack", &mut report);
     ui.track = true;
     ui.apply(&synth(false));
-    ui.set_scale(1.5);
-    save(&mut ui, dir, "scale15", &mut report);
-    ui.set_scale(2.0);
-    save(&mut ui, dir, "scale2", &mut report);
+    ui.set_scale(0.75);
+    save(&mut ui, dir, "scale075", &mut report);
+    ui.set_scale(1.25);
+    save(&mut ui, dir, "scale125", &mut report);
 
     // Animation frame cost at 1x (snake layer only).
     ui.set_scale(1.0);

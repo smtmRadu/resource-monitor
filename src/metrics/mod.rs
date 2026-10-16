@@ -71,6 +71,8 @@ pub struct Info {
     pub cpu_name: String,
     pub gpu_name: String,
     pub igpu_name: String,
+    /// DISK snake full scale: the system disk's max transfer speed (MB/s).
+    pub disk_max_mbs: f32,
 }
 
 static LATEST: Mutex<Option<Snapshot>> = Mutex::new(None);
@@ -89,6 +91,7 @@ pub fn info() -> Info {
         cpu_name: gpu::cpu_name(),
         gpu_name: gpu::dgpu_name(),
         igpu_name: gpu::igpu_name(),
+        disk_max_mbs: disks::max_mbs(),
     }
 }
 

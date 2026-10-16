@@ -8,7 +8,7 @@ use std::collections::VecDeque;
 
 use tiny_skia::{FillRule, GradientStop, LineCap, LinearGradient, Pixmap, PixmapMut, Point, SpreadMode, Transform};
 
-use crate::draw::{self, col, col_a, Glyph, MUTED, PILL, RED, TXT, WATT};
+use crate::draw::{self, Glyph, MUTED, PILL, RED, TXT, WATT};
 use crate::metrics::{Drive, Info, Snapshot, Vendor};
 use crate::text::{Anchor, Text};
 
@@ -56,9 +56,23 @@ fn name(g: Glyph) -> &'static str {
 }
 
 /// Used share of all fixed drives together (bytes-weighted), 0..1.
-fn storage_used(drives: &[Drive]) -> Option<f32> {
-    let total: f64 = drives.iter().map(|d| d.total_bytes as f64).sum();
-    (total > 0.0).then(|| (drives.iter().map(|d| d.used as f64 * d.total_bytes as f64).sum::<f64>() / total) as f32)
+/// Add ribbon `b`'s interior (inside its contour) to the line clip mask; `s` = scale.
+fn track_clip(m: &mut tiny_skia::Mask, b: BoxF, s: f32) {
+    let (k, lw) = (2.0 * s, s.round().max(1.0));
+    let (x0, x1) = (b.x + k, b.x + b.w - k);
+    if let Some(p) = draw::rrect(x0 + lw, b.y + k + lw, x1 - x0 - 2.0 * lw, b.h - 2.0 * (k + lw), PILL_H / 2.0 * s - lw) {
+        m.fill_path(&p, FillRule::Winding, true, Transform::identity());
+    }
+}
+
+/// Every UI layer renders in BGRA, the window DIB's byte order (pushed without
+/// a swizzle): colors swap red and blue here.
+fn col(hex: u32) -> tiny_skia::Color {
+    col_a(hex, 1.0)
+}
+
+fn col_a(hex: u32, a: f32) -> tiny_skia::Color {
+    draw::col_a(((hex & 0xff) << 16) | (hex & 0xff00) | ((hex >> 16) & 0xff), a)
 }
 
 fn pct(v: f32) -> String {
@@ -122,6 +136,8 @@ pub struct Ui {
     cpu_name: String,
     gpu_name: String,
     igpu_name: String,
+    /// DISK snake full length at this transfer speed (MB/s); log2(1 + MB/s) scale.
+    disk_max_mbs: f32,
     /// Per row: 0 = collapsed, 1 = fully shown; eases toward `visible` (linear progress).
     open: [f32; 8],
     icon_boxes: Vec<(usize, BoxF)>,
@@ -146,6 +162,10 @@ pub struct Ui {
     phase: f32,
     line_acc: f32,
     lines_dirty: bool,
+    /// Union of the ribbon interiors (line clip), rebuilt after each static render.
+    clip: Option<tiny_skia::Mask>,
+    /// Byte ranges (one per row) where `prev` and `stat` differ: the only pixels a crossfade moves.
+    fade_spans: Vec<std::ops::Range<usize>>,
     overlay: Pixmap,
     dirty: bool,
 }
@@ -203,6 +223,7 @@ impl Ui {
             cpu_name: info.cpu_name.clone(),
             gpu_name: info.gpu_name.clone(),
             igpu_name: info.igpu_name.clone(),
+            disk_max_mbs: info.disk_max_mbs,
             open: [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0], // iGPU and FPS start hidden
             icon_boxes: Vec::new(),
             stat: Pixmap::new(1, 1).unwrap(),
@@ -218,6 +239,8 @@ impl Ui {
             line_acc: 0.0,
             lines_dirty: true,
             overlay: Pixmap::new(1, 1).unwrap(),
+            clip: None,
+            fade_spans: Vec::new(),
             dirty: true,
         }
     }
@@ -353,7 +376,7 @@ impl Ui {
             Some(g.util.unwrap_or(0.0)),
             vram_p.or(Some(0.0)),
             Some(s.igpu.unwrap_or(0.0)),
-            storage_used(&s.drives).map(|u| u * 100.0),
+            Some((1.0 + s.disk_mbs).log2() / (1.0 + self.disk_max_mbs).log2() * 100.0),
             None,
             Some(s.fps.map(|f| f / hz * 100.0).unwrap_or(0.0)),
         ];
@@ -444,6 +467,17 @@ impl Ui {
             self.label(&mut base.as_mut(), fm, t, b.x + b.w / 2.0, b.y + b.h / 2.0, WATT, Anchor::Center);
         }
         self.stat = base;
+        self.fade_spans.clear();
+        if self.fade < 1.0 {
+            let row = self.stat.width() as usize;
+            let (a, b) = (self.prev.data().as_chunks::<4>().0, self.stat.data().as_chunks::<4>().0);
+            for (y, (ra, rb)) in a.chunks(row).zip(b.chunks(row)).enumerate() {
+                if let (Some(x0), Some(x1)) = (ra.iter().zip(rb).position(|(p, q)| p != q), ra.iter().zip(rb).rposition(|(p, q)| p != q)) {
+                    self.fade_spans.push((y * row + x0) * 4..(y * row + x1 + 1) * 4);
+                }
+            }
+        }
+        self.clip = None;
         self.dirty = false;
         self.lines_dirty = true;
     }
@@ -459,16 +493,29 @@ impl Ui {
             // Premultiplied lerp prev -> stat; only changed pixels (values) actually move.
             let t = self.fade * self.fade * (3.0 - 2.0 * self.fade);
             let k = (t * 256.0) as u32;
-            for (d, &o) in self.base.data_mut().iter_mut().zip(self.prev.data()) {
-                let n = *d as u32;
-                if n != o as u32 {
-                    *d = ((o as u32 * (256 - k) + n * k) >> 8) as u8;
+            let (base, prev) = (self.base.data_mut(), self.prev.data());
+            for r in &self.fade_spans {
+                for (d, &o) in base[r.clone()].iter_mut().zip(&prev[r.clone()]) {
+                    let n = *d as u32;
+                    if n != o as u32 {
+                        *d = ((o as u32 * (256 - k) + n * k) >> 8) as u8;
+                    }
+                }
+            }
+        }
+        if self.clip.is_none() {
+            let (w, h) = (self.stat.width(), self.stat.height());
+            self.clip = tiny_skia::Mask::new(w, h);
+            let boxes: Vec<BoxF> = self.track_boxes.iter().map(|&(_, b)| b).collect();
+            if let Some(m) = self.clip.as_mut() {
+                for b in boxes {
+                    track_clip(m, b, self.s);
                 }
             }
         }
         let mut base = std::mem::replace(&mut self.base, Pixmap::new(1, 1).unwrap());
-        for (i, tb) in self.track_boxes.clone() {
-            self.track_lines(&mut base.as_mut(), ROWS[i], tb);
+        for &(i, tb) in &self.track_boxes {
+            self.track_lines(&mut base.as_mut(), ROWS[i], tb, self.clip.as_ref());
         }
         for (k, b) in self.gauge_boxes.clone() {
             // The ring's square comes straight from `stat` (no crossfade ghost of the old number).
@@ -495,8 +542,13 @@ impl Ui {
         let ty = y + self.u(ROW_H);
         let tb = BoxF { x: 0.0, y: (ty + self.u(1.0)).round(), w: self.u(WIDTH).round(), h: self.u(TRACK_H).round() };
         self.render_track(pix, tb);
+        self.track_captions(pix, g, tb);
         if lines {
-            self.track_lines(pix, g, tb);
+            let mut clip = tiny_skia::Mask::new(pix.width(), pix.height());
+            if let Some(m) = clip.as_mut() {
+                track_clip(m, tb, self.s);
+            }
+            self.track_lines(pix, g, tb, clip.as_ref());
         }
         Some(tb)
     }
@@ -795,11 +847,8 @@ impl Ui {
         }
     }
 
-    /// Ribbon lines + captions. Lines scroll left by `phase` of a step and end in
-    /// a head easing from the previous sample to the newest (one sample behind,
-    /// so the motion never jumps).
-    fn track_lines(&mut self, pix: &mut PixmapMut, g: Glyph, b: BoxF) {
-        // Captions first: the lines draw over them.
+    /// Ribbon captions (model name, FPS scale), in the static layer under the lines.
+    fn track_captions(&mut self, pix: &mut PixmapMut, g: Glyph, b: BoxF) {
         let (fnum, ty) = (self.font_num(), b.y + self.u(14.0)); // under the 100% line (gy(100) = +5)
         let (lx0, lx1) = (b.x + self.u(6.0), b.x + b.w - self.u(6.0));
         let name = match g {
@@ -814,14 +863,15 @@ impl Ui {
             let w = self.text.measure(fnum, &t) as f32;
             self.label(pix, fnum, &t, lx1 - w - self.u(4.0), ty, TRACK_LBL, Anchor::West);
         }
-        // Lines span the ribbon edge to edge, clipped to the inside of the contour.
-        let (m, lw) = (self.u(2.0), self.s.round().max(1.0));
+    }
+
+    /// Ribbon lines, clipped to the ribbon interiors (`clip`, see `track_clip`).
+    /// They scroll left by `phase` of a step and end in a head easing from the
+    /// previous sample to the newest (one sample behind, so the motion never jumps).
+    fn track_lines(&self, pix: &mut PixmapMut, g: Glyph, b: BoxF, clip: Option<&tiny_skia::Mask>) {
+        // Lines span the ribbon edge to edge.
+        let m = self.u(2.0);
         let (x0, x1) = (b.x + m, b.x + b.w - m);
-        let mut clip = tiny_skia::Mask::new(pix.width(), pix.height());
-        if let (Some(clip), Some(p)) = (clip.as_mut(), draw::rrect(x0 + lw, b.y + m + lw, x1 - x0 - 2.0 * lw, b.h - 2.0 * (m + lw), self.u(PILL_H / 2.0) - lw)) {
-            clip.fill_path(&p, FillRule::Winding, true, Transform::identity());
-        }
-        let clip = clip.as_ref();
         let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
         let (step, ph) = ((x1 - x0) / (HIST as f32 - 1.0), self.phase);
         let line = |pix: &mut PixmapMut, vals: &VecDeque<f32>, c: u32| {
@@ -946,7 +996,7 @@ impl Ui {
     }
 
     /// Snake layer: transparent except the snakes; spans only the icon column
-    /// down to the last snake row. Drawn in BGRA order (ready for the window DIB).
+    /// down to the last snake row.
     pub fn overlay(&mut self) -> &Pixmap {
         if self.dirty {
             self.render_base(); // layout (icon boxes) must be current
@@ -1009,8 +1059,7 @@ impl Ui {
         let n = (len / self.u(3.0)).ceil().max(2.0) as usize;
         let pts: Vec<(f32, f32)> = (0..=n).map(|k| at(start + len * k as f32 / n as f32)).collect();
         if let Some(p) = draw::polyline(&pts, full) {
-            let bgr = ((c & 0xff) << 16) | (c & 0xff00) | ((c >> 16) & 0xff);
-            pix.stroke_path(&p, &draw::paint(col(bgr)), &draw::stroke(self.u(2.0), LineCap::Butt), Transform::identity(), None);
+            pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Butt), Transform::identity(), None);
         }
     }
 }
