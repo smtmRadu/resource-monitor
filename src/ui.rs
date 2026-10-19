@@ -9,6 +9,7 @@ use std::collections::VecDeque;
 use tiny_skia::{FillRule, GradientStop, LineCap, LinearGradient, Pixmap, PixmapMut, Point, SpreadMode, Transform};
 
 use crate::draw::{self, Glyph, MUTED, PILL, RED, TXT, WATT};
+use crate::links::{Icon, Link, State};
 use crate::metrics::{Drive, Info, Snapshot, Vendor};
 use crate::text::{Anchor, Text};
 
@@ -73,6 +74,48 @@ fn col(hex: u32) -> tiny_skia::Color {
 
 fn col_a(hex: u32, a: f32) -> tiny_skia::Color {
     draw::col_a(((hex & 0xff) << 16) | (hex & 0xff00) | ((hex >> 16) & 0xff), a)
+}
+
+/// Blend two 0xRRGGBB colors.
+fn lerp_col(a: u32, b: u32, t: f32) -> u32 {
+    let ch = |s: u32| {
+        let (x, y) = (((a >> s) & 0xff) as f32, ((b >> s) & 0xff) as f32);
+        ((x + (y - x) * t).round() as u32) << s
+    };
+    ch(16) | ch(8) | ch(0)
+}
+
+/// Step counts: 999, 1200, 12.3k, 1.2M.
+fn count(n: u64) -> String {
+    match n {
+        0..=9_999 => n.to_string(),
+        10_000..=999_999 => format!("{:.1}k", n as f32 / 1000.0),
+        _ => format!("{:.1}M", n as f32 / 1e6),
+    }
+}
+
+/// Durations: 45s, 12m, 1h05m.
+fn dur(s: f32) -> String {
+    let s = s.round() as u64;
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        _ => format!("{}h{:02}m", s / 3600, s % 3600 / 60),
+    }
+}
+
+/// Metric values: 3 significant digits (2.31, 0.412, 12.5).
+fn sig(v: f32) -> String {
+    let a = v.abs();
+    if a >= 100.0 {
+        format!("{v:.0}")
+    } else if a >= 10.0 {
+        format!("{v:.1}")
+    } else if a >= 1.0 {
+        format!("{v:.2}")
+    } else {
+        format!("{v:.3}")
+    }
 }
 
 fn pct(v: f32) -> String {
@@ -167,6 +210,12 @@ pub struct Ui {
     /// Byte ranges (one per row) where `prev` and `stat` differ: the only pixels a crossfade moves.
     fade_spans: Vec<std::ops::Range<usize>>,
     overlay: Pixmap,
+    /// Linked rows (own window, bottom-up); rendered only while links exist.
+    links: Pixmap,
+    /// Linked rows' snakes (own narrow window over their title pills): (box, color) + state.
+    link_boxes: Vec<(BoxF, u32)>,
+    link_snakes: Vec<Snake>,
+    links_overlay: Pixmap,
     dirty: bool,
 }
 
@@ -239,6 +288,10 @@ impl Ui {
             line_acc: 0.0,
             lines_dirty: true,
             overlay: Pixmap::new(1, 1).unwrap(),
+            links: Pixmap::new(1, 1).unwrap(),
+            link_boxes: Vec::new(),
+            link_snakes: Vec::new(),
+            links_overlay: Pixmap::new(1, 1).unwrap(),
             clip: None,
             fade_spans: Vec::new(),
             dirty: true,
@@ -919,12 +972,246 @@ impl Ui {
         }
     }
 
+    // ---------------------------------------------------------- linked rows
+    /// Linked rows, the first link at the bottom (the stack grows upward).
+    /// `now` counts the ETA down between writes.
+    pub fn links(&mut self, links: &[Link], now: std::time::SystemTime) -> &Pixmap {
+        let block = |l: &Link| ROW_H + if l.points.len() >= 2 { 1.0 + TRACK_H + 4.0 } else { 0.0 };
+        let (w, h) = (self.u(WIDTH).ceil() as u32, self.u(links.iter().map(block).sum::<f32>()).ceil() as u32);
+        if self.links.width() != w || self.links.height() != h {
+            self.links = Pixmap::new(w.max(1), h.max(1)).unwrap();
+        } else {
+            self.links.fill(tiny_skia::Color::TRANSPARENT);
+        }
+        let mut pix = std::mem::replace(&mut self.links, Pixmap::new(1, 1).unwrap());
+        let mut y = 0.0f32;
+        self.link_boxes.clear();
+        let mut targets = Vec::new();
+        for l in links.iter().rev() {
+            let ib = self.link_block(&mut pix.as_mut(), l, y, now);
+            if let Some(t) = l.snake {
+                let c = l.icon.as_ref().map_or(l.colors.0, |i| i.color);
+                self.link_boxes.push((ib, c));
+                targets.push(t);
+            }
+            y += self.u(block(l));
+        }
+        // Snakes keep their motion across renders (rows are sorted, so slots stay put).
+        self.link_snakes.resize(targets.len(), Snake::default());
+        for (s, t) in self.link_snakes.iter_mut().zip(targets) {
+            s.target = t;
+        }
+        self.links = pix;
+        &self.links
+    }
+
+    /// One linked row (+ its graph ribbon); returns the title pill box (snake path).
+    fn link_block(&mut self, pix: &mut PixmapMut, l: &Link, y: f32, now: std::time::SystemTime) -> BoxF {
+        let fm = self.font_main();
+        let ph = self.u(PILL_H).round();
+        let lead = if l.icon.is_some() { 31.0 } else { 12.0 };
+        // Right pill: custom text, else "step/total" + ETA (or the final state).
+        let steps = match (l.step, l.total) {
+            (Some(s), Some(t)) => format!("{}/{}", count(s), count(t)),
+            (Some(s), None) => count(s),
+            _ => String::new(),
+        };
+        let (main, sub, c) = match (&l.text, l.state) {
+            (Some(t), _) => (t.clone(), String::new(), TXT),
+            (None, State::Done) => ("done".into(), steps, 0x4ade80),
+            (None, State::Failed) => ("failed".into(), steps, RED),
+            (None, State::Running) => {
+                let gone = now.duration_since(l.at).map_or(0.0, |d| d.as_secs_f32());
+                let eta = l.eta_s.map(|e| format!("ETA {}", dur((e - gone).max(0.0)))).unwrap_or_default();
+                (steps, eta, TXT)
+            }
+        };
+        // The ETA / step count after the main text: smaller and muted, so the title keeps its room.
+        let fs = self.font_num() + 1;
+        let gap = if sub.is_empty() { 0.0 } else { self.text.measure(fm, &format!("{main} ")) as f32 };
+        let right = if sub.is_empty() { self.text.measure(fm, &main) as f32 } else { gap + self.text.measure(fs, &sub) as f32 };
+        // The right text always fits: the title pill takes what is left (title cut with an ellipsis).
+        let max_iw = (self.u(252.0 - GAP - 16.0) - right).max(self.u(ICON_W));
+        let mut title = l.title.clone();
+        if self.u(lead + 9.0) + self.text.measure(fm, &title) as f32 > max_iw {
+            while !title.is_empty() && self.u(lead + 9.0) + self.text.measure(fm, &format!("{title}\u{2026}")) as f32 > max_iw {
+                title.pop();
+            }
+            title.push('\u{2026}');
+        }
+        let iw = (self.u(lead + 9.0) + self.text.measure(fm, &title) as f32).max(self.u(ICON_W)).round();
+        let vw = (self.u(252.0 - GAP) - iw).round();
+        let top = (y + self.u(6.0)).round();
+        let ib = BoxF { x: self.u(MARGIN).round(), y: top, w: iw, h: ph };
+        let vb = BoxF { x: (iw + self.u(2.0 * MARGIN + GAP)).round(), y: top, w: vw, h: ph };
+        let ty = top + ph / 2.0;
+        let m = self.u(2.0);
+        let hh = ph - 2.0 * m;
+        for b in [ib, vb] {
+            self.capsule(pix, b);
+            self.contour(pix, b.x + m, b.y + m, b.w - 2.0 * m, hh, hh / 2.0);
+        }
+        if let Some(icon) = &l.icon {
+            self.vec_icon(pix, icon, ib.x + self.u(16.0), ty, self.u(17.0));
+        }
+        self.label(pix, fm, &title, ib.x + self.u(lead), ty, TXT, Anchor::West);
+        let tx = vb.x + self.u(8.0);
+        self.label(pix, fm, &main, tx, ty, c, Anchor::West);
+        if !sub.is_empty() {
+            self.label(pix, fs, &sub, tx + gap, ty, MUTED, Anchor::West);
+        }
+        if l.points.len() < 2 {
+            // No graph: progress as a thin gradient bar along the pill's bottom.
+            if let Some(p) = l.progress() {
+                let (x0, bw, bh) = (vb.x + self.u(12.0), vb.w - self.u(24.0), self.u(2.0));
+                let by = vb.y + vb.h - m - self.u(4.0);
+                draw::fill_rrect(pix, x0, by, bw, bh, bh / 2.0, col(GRID));
+                self.gradient_rrect(pix, x0, by, (bw * p).max(bh), bh, l.colors, x0, x0 + bw);
+            }
+            return ib;
+        }
+        let tb = BoxF { x: 0.0, y: (y + self.u(ROW_H) + self.u(1.0)).round(), w: self.u(WIDTH).round(), h: self.u(TRACK_H).round() };
+        self.render_track(pix, tb);
+        let mut clip = tiny_skia::Mask::new(pix.width(), pix.height());
+        if let Some(mk) = clip.as_mut() {
+            track_clip(mk, tb, self.s);
+        }
+        self.link_graph(pix, l, tb, clip.as_ref());
+        // Captions over the graph: a run starts at its highest loss, right under the left caption.
+        let (fnum, cy) = (self.font_num(), tb.y + self.u(14.0));
+        let (lx0, lx1) = (tb.x + self.u(10.0), tb.x + tb.w - self.u(10.0));
+        let cap = l.caption.clone();
+        self.label(pix, fnum, &cap, lx0, cy, TRACK_LBL, Anchor::West);
+        if let Some(&(_, last)) = l.points.last() {
+            let t = format!("{} {}", l.metric, sig(last)).trim().to_string();
+            let tw = self.text.measure(fnum, &t) as f32;
+            self.label(pix, fnum, &t, lx1 - tw, cy, TRACK_LBL, Anchor::West);
+        }
+        ib
+    }
+
+    /// Graph over the whole run: x = share of the run (the head reaching the
+    /// right edge = finished), y = 0 .. the largest value shown. The line has a
+    /// left-to-right gradient; the fill fades down in the head's color.
+    fn link_graph(&self, pix: &mut PixmapMut, l: &Link, b: BoxF, clip: Option<&tiny_skia::Mask>) {
+        let m = self.u(2.0);
+        let (x0, x1) = (b.x + m, b.x + b.w - m);
+        // One mean per ~2 px column: thousands of noisy steps become a readable line.
+        let cols = ((x1 - x0) / self.u(2.0)).max(2.0) as usize;
+        let mut acc: Vec<(f32, f32, u32)> = Vec::new(); // (sum x, sum y, n) per used column
+        let mut last_col = usize::MAX;
+        for &(x, v) in &l.points {
+            let c = ((x * cols as f32) as usize).min(cols - 1);
+            if c != last_col {
+                acc.push((0.0, 0.0, 0));
+                last_col = c;
+            }
+            if let Some(a) = acc.last_mut() {
+                *a = (a.0 + x, a.1 + v, a.2 + 1);
+            }
+        }
+        let vals: Vec<(f32, f32)> = acc.iter().map(|&(sx, sy, n)| (sx / n as f32, sy / n as f32)).collect();
+        let top = vals.iter().map(|p| p.1).fold(f32::MIN, f32::max).max(1e-6);
+        // The top value sits under the caption row (headroom), not on the ribbon's edge.
+        let gy = |v: f32| b.y + b.h - self.u(5.0) - (v.max(0.0) / top) * (b.h - self.u(25.0));
+        let mut pts: Vec<(f32, f32)> = vals.iter().map(|&(x, v)| (x0 + x * (x1 - x0), gy(v))).collect();
+        if pts.len() < 2 {
+            pts.insert(0, (x0, pts.first().map_or(gy(0.0), |p| p.1)));
+        }
+        let head = pts[pts.len() - 1];
+        let hc = lerp_col(l.colors.0, l.colors.1, ((head.0 - x0) / (x1 - x0)).clamp(0.0, 1.0));
+        let mut area = pts.clone();
+        area.extend([(head.0, b.y + b.h), (pts[0].0, b.y + b.h)]);
+        let ymin = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).min(gy(0.0) - 1.0);
+        let shade = LinearGradient::new(
+            Point::from_xy(0.0, ymin),
+            Point::from_xy(0.0, gy(0.0)),
+            vec![GradientStop::new(0.0, col_a(hc, 0.32)), GradientStop::new(1.0, col_a(hc, 0.0))],
+            SpreadMode::Pad,
+            Transform::identity(),
+        );
+        if let (Some(p), Some(shader)) = (draw::polyline(&area, true), shade) {
+            let mut paint = draw::paint(col(hc));
+            paint.shader = shader;
+            pix.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), clip);
+        }
+        if let (Some(p), Some(shader)) = (draw::polyline(&pts, false), self.hgrad(l.colors, x0, x1)) {
+            let mut paint = draw::paint(col(hc));
+            paint.shader = shader;
+            pix.stroke_path(&p, &paint, &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), clip);
+        }
+        // Head: a dot with a soft halo, so the progress point reads at a glance.
+        for (r, a) in [(4.5, 0.25), (2.6, 1.0)] {
+            if let Some(p) = tiny_skia::PathBuilder::from_circle(head.0.min(x1 - self.u(3.0)), head.1, self.u(r)) {
+                pix.fill_path(&p, &draw::paint(col_a(hc, a)), FillRule::Winding, Transform::identity(), clip);
+            }
+        }
+    }
+
+    /// Linked rows' snake layer: transparent except the snakes, as wide as the title pills.
+    pub fn links_overlay(&mut self) -> &Pixmap {
+        let pad = self.u(2.0).ceil() + 1.0;
+        let w = self.link_boxes.iter().map(|(b, _)| b.x + b.w + pad).fold(1.0, f32::max).ceil() as u32;
+        let h = self.links.height();
+        if self.links_overlay.width() != w || self.links_overlay.height() != h {
+            self.links_overlay = Pixmap::new(w.max(1), h.max(1)).unwrap();
+        } else {
+            self.links_overlay.fill(tiny_skia::Color::TRANSPARENT);
+        }
+        let mut ov = std::mem::replace(&mut self.links_overlay, Pixmap::new(1, 1).unwrap());
+        for (&(b, c), &sn) in self.link_boxes.iter().zip(&self.link_snakes) {
+            self.snake_seg(&mut ov.as_mut(), sn, 0.0, c, b);
+        }
+        self.links_overlay = ov;
+        &self.links_overlay
+    }
+
+    /// Linked rows have snakes (their overlay window is needed).
+    pub fn has_link_snakes(&self) -> bool {
+        !self.link_boxes.is_empty()
+    }
+
+    /// Horizontal gradient shader spanning x0..x1 (the whole run).
+    fn hgrad(&self, c: (u32, u32), x0: f32, x1: f32) -> Option<tiny_skia::Shader<'static>> {
+        LinearGradient::new(
+            Point::from_xy(x0, 0.0),
+            Point::from_xy(x1, 0.0),
+            vec![GradientStop::new(0.0, col(c.0)), GradientStop::new(1.0, col(c.1))],
+            SpreadMode::Pad,
+            Transform::identity(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gradient_rrect(&self, pix: &mut PixmapMut, x: f32, y: f32, w: f32, h: f32, c: (u32, u32), gx0: f32, gx1: f32) {
+        if let (Some(p), Some(shader)) = (draw::rrect(x, y, w, h, h / 2.0), self.hgrad(c, gx0, gx1)) {
+            let mut paint = draw::paint(col(c.0));
+            paint.shader = shader;
+            pix.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), None);
+        }
+    }
+
+    /// A link's vector icon (24x24 grid) centered at (cx, cy), `size` px wide.
+    fn vec_icon(&self, pix: &mut PixmapMut, icon: &Icon, cx: f32, cy: f32, size: f32) {
+        let k = size / 24.0;
+        let (ox, oy) = (cx - 12.0 * k, cy - 12.0 * k);
+        if let Some(bg) = icon.bg {
+            draw::fill_rrect(pix, ox, oy, size, size, icon.radius * k, col(bg));
+        }
+        for (path, &closed) in icon.paths.iter().zip(&icon.closed) {
+            let pts: Vec<(f32, f32)> = path.iter().map(|&(x, y)| (ox + x * k, oy + y * k)).collect();
+            if let Some(p) = draw::polyline(&pts, closed) {
+                pix.stroke_path(&p, &draw::paint(col(icon.color)), &draw::stroke(icon.width * k, LineCap::Round), Transform::identity(), None);
+            }
+        }
+    }
+
     // ------------------------------------------------------------ animation
     /// Advance snakes by `dt` seconds (tuned to the original 0.009/frame at 24 fps).
     pub fn step(&mut self, dt: f32) {
         let f = dt / 0.042;
         let ease = 1.0 - 0.88f32.powf(f);
-        for s in &mut self.snakes {
+        for s in self.snakes.iter_mut().chain(self.link_snakes.iter_mut()) {
             s.head = (s.head + 0.009 * f).fract();
             s.len += (s.target - s.len) * ease;
         }
@@ -978,6 +1265,13 @@ impl Ui {
         self.lines_moving()
             || self.rows_moving()
             || self.icon_boxes.iter().any(|&(i, _)| moving(self.snakes[i]) || (ROWS[i] == Glyph::Net && moving(self.snakes[8])))
+            || self.link_snakes.iter().any(|&s| moving(s))
+    }
+
+    /// Forget the linked rows' snakes (no links left: the pacer may stop for them).
+    pub fn clear_link_snakes(&mut self) {
+        self.link_boxes.clear();
+        self.link_snakes.clear();
     }
 
     /// Static layer (capsules, text, gauges, ribbons), re-rendered only when dirty.

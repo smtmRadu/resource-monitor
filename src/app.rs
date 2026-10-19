@@ -1,10 +1,12 @@
 //! Windows, message loop, frame pacing and tray handling.
 //!
-//! Two layered, click-through, topmost popups with per-pixel alpha:
+//! Three layered, click-through, topmost popups with per-pixel alpha:
 //! - main: capsules, text, gauges, ribbons; updated once per data tick
 //! - snakes: a narrow transparent overlay over the icon column, redrawn at the
 //!   monitor refresh rate while a snake moves (UpdateLayeredWindow cost scales
 //!   with window size, so 60 Hz frames only push this small surface)
+//! - links: linked rows (training runs, other jobs) docked bottom-left, growing
+//!   upward; hidden and never rendered while no link exists
 //!
 //! Python used a chroma-key window plus Tk bindings that could never fire (the
 //! window was click-through), and "hide to tray" had no way back; here all
@@ -44,6 +46,8 @@ const WM_APP_CMD: u32 = WM_APP + 4;
 const WM_APP_SHOW: u32 = WM_APP + 5;
 /// AppBar notifications from the shell (Exclusive mode).
 const WM_APP_BAR: u32 = WM_APP + 6;
+/// The links watcher has new rows.
+const WM_APP_LINKS: u32 = WM_APP + 7;
 const TIMER_TOPMOST: usize = 2;
 const WINDOW_ALPHA: u8 = 237; // 0.93
 
@@ -118,11 +122,19 @@ impl Layer {
 struct App {
     main: Layer,
     snakes: Layer,
+    links: Layer,
+    links_snakes: Layer,
+    /// Linked rows' window top-left.
+    links_at: POINT,
+    /// Current linked rows (empty: the links window stays hidden).
+    link_rows: Vec<crate::links::Link>,
+    links_shown: bool,
     ui: Ui,
     settings: Settings,
     dpi: u32,
-    /// Chosen display's full rect.
+    /// Chosen display's full rect, and its work area (without the taskbar).
     monitor: RECT,
+    work: RECT,
     /// Window top-left on the chosen display (10px in from its corner, or from the strip's).
     origin: POINT,
     /// Strip reserved as an AppBar (Exclusive mode); None while overlayed or hidden.
@@ -209,16 +221,28 @@ pub fn run() {
         let hinst: HINSTANCE = GetModuleHandleW(None).unwrap_or_default().into();
         let main_class = w!("ResourceMonitorRs");
         let snake_class = w!("ResourceMonitorRsSnakes");
-        for (class, proc_) in [(main_class, Some(wndproc as _)), (snake_class, Some(defproc as _))] {
+        let links_class = w!("ResourceMonitorRsLinks");
+        let link_snakes_class = w!("ResourceMonitorRsLinkSnakes");
+        for (class, proc_) in [
+            (main_class, Some(wndproc as _)),
+            (snake_class, Some(defproc as _)),
+            (links_class, Some(defproc as _)),
+            (link_snakes_class, Some(defproc as _)),
+        ] {
             let wc = WNDCLASSW { lpfnWndProc: proc_, hInstance: hinst, lpszClassName: class, ..Default::default() };
             RegisterClassW(&wc);
         }
-        let (Some(hwnd), Some(snake_hwnd)) = (popup(main_class, w!("Resource Monitor"), hinst), popup(snake_class, w!(""), hinst)) else {
+        let (Some(hwnd), Some(snake_hwnd), Some(links_hwnd), Some(link_snakes_hwnd)) = (
+            popup(main_class, w!("Resource Monitor"), hinst),
+            popup(snake_class, w!(""), hinst),
+            popup(links_class, w!(""), hinst),
+            popup(link_snakes_class, w!(""), hinst),
+        ) else {
             log("CreateWindowExW failed");
             return;
         };
         let settings = Settings::load(monitors().len());
-        let (monitor, dpi, displays) = placement(settings.display);
+        let (monitor, work, dpi, displays) = placement(settings.display);
         let info = crate::metrics::info();
         log(&format!("disk max {:.0} MB/s", info.disk_max_mbs));
         let ui = Ui::new(info, settings.scale * dpi as f32 / 96.0, settings.track);
@@ -227,10 +251,16 @@ pub fn run() {
             *a.borrow_mut() = Some(App {
                 main: Layer::new(hwnd),
                 snakes: Layer::new(snake_hwnd),
+                links: Layer::new(links_hwnd),
+                links_snakes: Layer::new(link_snakes_hwnd),
+                links_at: POINT::default(),
+                link_rows: Vec::new(),
+                links_shown: false,
                 ui,
                 settings,
                 dpi,
                 monitor,
+                work,
                 origin: POINT::default(),
                 bar: None,
                 displays,
@@ -260,6 +290,7 @@ pub fn run() {
         let _ = ShowWindow(snake_hwnd, SW_SHOWNOACTIVATE);
         SetTimer(Some(hwnd), TIMER_TOPMOST, 2000, None);
         crate::metrics::start(hwnd, WM_APP_DATA);
+        crate::links::start(hwnd, WM_APP_LINKS);
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -280,8 +311,9 @@ impl App {
     /// Re-resolve the chosen display (monitors come and go), its DPI, the
     /// Exclusive strip and the window origin.
     fn place(&mut self) {
-        let (monitor, dpi, displays) = placement(self.settings.display);
+        let (monitor, work, dpi, displays) = placement(self.settings.display);
         self.monitor = monitor;
+        self.work = work;
         self.displays = displays;
         if dpi != self.dpi {
             self.dpi = dpi;
@@ -343,6 +375,44 @@ impl App {
         self.present_snakes();
     }
 
+    /// Both stacks: after data ticks, link changes, layout or settings changes
+    /// (never per animation frame: linked rows redraw at most once a second).
+    fn present_all(&mut self) {
+        self.present();
+        self.present_links();
+    }
+
+    /// Linked rows, bottom-left of the work area (above the taskbar), growing
+    /// upward. No rows: the window hides and nothing renders.
+    fn present_links(&mut self) {
+        let show = self.visible && !self.link_rows.is_empty();
+        if show {
+            let pix = self.ui.links(&self.link_rows, std::time::SystemTime::now());
+            let off = (10 * self.dpi / 96) as i32;
+            self.links_at = POINT { x: self.origin.x, y: self.work.bottom - off - pix.height() as i32 };
+            self.links.push(pix, self.links_at);
+        } else {
+            self.ui.clear_link_snakes();
+        }
+        let snakes = show && self.ui.has_link_snakes();
+        if snakes {
+            let at = self.links_at;
+            self.links_snakes.push(self.ui.links_overlay(), at);
+        }
+        if show != self.links_shown {
+            self.links_shown = show;
+            unsafe {
+                let _ = ShowWindow(self.links.hwnd, if show { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+        }
+        unsafe {
+            if IsWindowVisible(self.links_snakes.hwnd).as_bool() != snakes {
+                let _ = ShowWindow(self.links_snakes.hwnd, if snakes { SW_SHOWNOACTIVATE } else { SW_HIDE });
+            }
+        }
+        self.sync_anim();
+    }
+
     /// Push only the snake overlay (every animation frame).
     fn present_snakes(&mut self) {
         if !self.visible {
@@ -350,6 +420,10 @@ impl App {
         }
         let at = self.origin;
         self.snakes.push(self.ui.overlay(), at);
+        if self.links_shown && self.ui.has_link_snakes() {
+            let at = self.links_at;
+            self.links_snakes.push(self.ui.links_overlay(), at);
+        }
         self.sync_anim();
     }
 
@@ -389,9 +463,7 @@ impl App {
         let cmd = if v { SW_SHOWNOACTIVATE } else { SW_HIDE };
         // Hidden: the Exclusive strip is released (nothing to show in it).
         self.place();
-        if v {
-            self.present();
-        }
+        self.present_all(); // hidden: only hides the linked rows
         unsafe {
             let _ = ShowWindow(self.main.hwnd, cmd);
             let _ = ShowWindow(self.snakes.hwnd, cmd);
@@ -402,7 +474,7 @@ impl App {
     /// Keep both on top (other topmost windows can bury us), overlay above main.
     fn raise(&self) {
         unsafe {
-            for h in [self.main.hwnd, self.snakes.hwnd] {
+            for h in [self.main.hwnd, self.snakes.hwnd, self.links.hwnd, self.links_snakes.hwnd] {
                 let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 let ex = GetWindowLongW(h, GWL_EXSTYLE);
                 if ex & WS_EX_TRANSPARENT.0 as i32 == 0 {
@@ -446,13 +518,15 @@ impl App {
             }
             tray::ID_QUIT => unsafe {
                 let _ = DestroyWindow(self.snakes.hwnd);
+                let _ = DestroyWindow(self.links.hwnd);
+                let _ = DestroyWindow(self.links_snakes.hwnd);
                 let _ = DestroyWindow(self.main.hwnd);
                 return;
             },
             _ => return,
         }
         self.settings.save();
-        self.present();
+        self.present_all();
     }
 }
 
@@ -466,7 +540,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if let Some(s) = crate::metrics::take_latest() {
                 with_app(|a| {
                     a.ui.apply(&s);
-                    a.present();
+                    a.present_all();
+                });
+            }
+            LRESULT(0)
+        }
+        WM_APP_LINKS => {
+            if let Some(v) = crate::links::take_latest() {
+                log(&format!("links: {}", v.len()));
+                with_app(|a| {
+                    a.link_rows = v;
+                    a.present_links();
                 });
             }
             LRESULT(0)
@@ -498,7 +582,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 }
                 if a.settings.exclusive && a.visible && a.bar.is_none() {
                     a.place();
-                    a.present();
+                    a.present_all();
                 }
             });
             LRESULT(0)
@@ -542,7 +626,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         WM_DPICHANGED | WM_DISPLAYCHANGE => {
             with_app(|a| {
                 a.place();
-                a.present();
+                a.present_all();
             });
             DefWindowProcW(hwnd, msg, wp, lp)
         }
@@ -551,7 +635,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if wp.0 as u32 == ABN_POSCHANGED {
                 with_app(|a| {
                     a.place();
-                    a.present();
+                    a.present_all();
                 });
             }
             LRESULT(0)
@@ -572,7 +656,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     a.tray_ok = tray::add(hwnd, WM_APP_TRAY, a.dpi);
                     a.bar = None;
                     a.place();
-                    a.present();
+                    a.present_all();
                 });
                 return LRESULT(0);
             }
@@ -581,31 +665,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
-/// Monitors ordered primary first, then left-to-right: (rect, dpi, primary).
-fn monitors() -> Vec<(RECT, u32, bool)> {
+/// Monitors ordered primary first, then left-to-right: (rect, work area, dpi, primary).
+fn monitors() -> Vec<(RECT, RECT, u32, bool)> {
     unsafe extern "system" fn cb(h: HMONITOR, _: HDC, _: *mut RECT, lp: LPARAM) -> windows::core::BOOL {
-        let out = &mut *(lp.0 as *mut Vec<(RECT, u32, bool)>);
+        let out = &mut *(lp.0 as *mut Vec<(RECT, RECT, u32, bool)>);
         let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
         if GetMonitorInfoW(h, &mut mi).as_bool() {
             let (mut dx, mut dy) = (96u32, 96u32);
             let _ = GetDpiForMonitor(h, MDT_EFFECTIVE_DPI, &mut dx, &mut dy);
-            out.push((mi.rcMonitor, dx.max(96), mi.dwFlags & MONITORINFOF_PRIMARY != 0));
+            out.push((mi.rcMonitor, mi.rcWork, dx.max(96), mi.dwFlags & MONITORINFOF_PRIMARY != 0));
         }
         true.into()
     }
-    let mut v: Vec<(RECT, u32, bool)> = Vec::new();
+    let mut v: Vec<(RECT, RECT, u32, bool)> = Vec::new();
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(cb), LPARAM(&mut v as *mut _ as isize));
     }
-    v.sort_by_key(|(r, _, primary)| (!primary, r.left, r.top));
+    v.sort_by_key(|(r, _, _, primary)| (!primary, r.left, r.top));
     v
 }
 
-/// Rect + DPI of display `index` (falls back to primary when it is gone), and the display count.
-fn placement(index: usize) -> (RECT, u32, usize) {
+/// Rect, work area + DPI of display `index` (falls back to primary when it is gone), and the display count.
+fn placement(index: usize) -> (RECT, RECT, u32, usize) {
     let mons = monitors();
-    let Some(&(r, dpi, _)) = mons.get(index).or(mons.first()) else {
-        return (RECT { left: 0, top: 0, right: 1920, bottom: 1080 }, 96, 1);
+    let Some(&(r, work, dpi, _)) = mons.get(index).or(mons.first()) else {
+        let r = RECT { left: 0, top: 0, right: 1920, bottom: 1080 };
+        return (r, r, 96, 1);
     };
-    (r, dpi, mons.len())
+    (r, work, dpi, mons.len())
 }

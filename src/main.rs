@@ -6,6 +6,7 @@
 
 mod app;
 mod draw;
+mod links;
 mod log;
 mod metrics;
 mod selftest;

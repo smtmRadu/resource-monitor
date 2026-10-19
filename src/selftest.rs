@@ -150,5 +150,52 @@ pub fn run(dir: &str) {
             let _ = std::fs::write(dir.join(format!("{name}{dpi}_{w}x{h}.rgba")), px);
         }
     }
+    links(&mut ui, dir, &mut report);
     let _ = std::fs::write(dir.join("selftest.txt"), report);
+}
+
+const RUNPOD_ICON: &str = r##"{"color": "#8b5cf6", "width": 2.2,
+ "loops": [[12,2.6, 20.2,7.3, 20.2,16.7, 12,21.4, 3.8,16.7, 3.8,7.3]],
+ "lines": [[7.7,9.3, 12,11.8, 16.1,9.4, 16.1,7.5],
+           [7.1,12.5, 10.0,14.1, 10.0,17.4],
+           [16.9,12.5, 14.0,14.1, 14.0,17.4]]}"##;
+
+/// Linked rows: a running RunPod training (graph), a finished one, a generic progress row.
+fn links(ui: &mut Ui, dir: &Path, report: &mut String) {
+    let loss = |n: usize, total: f32| -> String {
+        let pts: Vec<String> = (1..=n)
+            .map(|i| {
+                let x = i as f32;
+                let v = 0.35 + 2.0 * (-x / (total * 0.12)).exp() + 0.06 * ((x * 1.7).sin() * (x * 0.31).cos());
+                format!("[{x},{v:.4}]")
+            })
+            .collect();
+        pts.join(",")
+    };
+    let train = format!(
+        r##"{{"title":"forum-user","icon":{RUNPOD_ICON},"step":1340,"total":3200,"snake":0.93,"eta_s":2830,"caption":"H100 SXM 80GB","metric":"loss","points":[{}]}}"##,
+        loss(1340, 3200.0)
+    );
+    let done = format!(
+        r##"{{"title":"bcp-reviews-dpo","icon":{RUNPOD_ICON},"step":800,"total":800,"state":"done","caption":"A100 SXM 80GB","metric":"loss","points":[{}],"colors":["#f472b6","#facc15"]}}"##,
+        loss(800, 800.0)
+    );
+    let generic = r#"{"title":"qwen download","text":"6.1/9.4 GB","progress":0.65}"#.to_string();
+    let rows: Vec<_> = [(train, 20), (done, 300), (generic, 1)].iter().filter_map(|(j, age)| crate::links::parse_str(j, *age)).collect();
+    let _ = writeln!(report, "links parsed: {}", rows.len());
+    for (name, n) in [("links1", 1), ("links3", 3)] {
+        let t = Instant::now();
+        let mut f = ui.links(&rows[..n], std::time::SystemTime::now()).clone();
+        let el = t.elapsed();
+        for _ in 0..30 {
+            ui.step(0.042);
+        }
+        let ov = ui.links_overlay().clone();
+        f.draw_pixmap(0, 0, ov.as_ref(), &tiny_skia::PixmapPaint::default(), tiny_skia::Transform::identity(), None);
+        for px in f.data_mut().as_chunks_mut::<4>().0 {
+            px.swap(0, 2);
+        }
+        let _ = std::fs::write(dir.join(format!("{name}_{}x{}.rgba", f.width(), f.height())), f.data());
+        let _ = writeln!(report, "{name}: {}x{} render {:?}", f.width(), f.height(), el);
+    }
 }

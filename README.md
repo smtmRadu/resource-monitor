@@ -62,6 +62,36 @@ Games in **exclusive / optimized fullscreen** (e.g. Dark Souls III's
 show above them. Use the game's **borderless** or **windowed** mode to see the
 monitor while playing.
 
+## Linked rows
+Other programs can show temporary rows (a training run, a download, any job) in a
+second stack at the **bottom-left** of the same display, above the taskbar.
+The rows are sorted by title, top to bottom, so a rewrite never moves one.
+
+A row is one JSON file: `%LOCALAPPDATA%\ResourceMonitor\links\<id>.json` (the
+same path for dev and installed builds). Write it to a temp file in that folder,
+then rename it over `<id>.json`. The monitor never reads half a file. Every
+write updates the row within ~50 ms. Deleting the file removes the row.
+Rows expire by themselves: `done` / `failed` 10 min after their last write,
+`running` 30 min after it (the writer died).
+
+| Field | Meaning |
+|---|---|
+| `title` | left pill text (cut with … when long) |
+| `icon` | optional vector icon, 24×24 grid: `{"color", "width", "lines": [[x,y,x,y…]], "loops": [[…]], "bg", "radius"}` (`loops` are closed, `bg` = optional tile) |
+| `snake` | optional 0..1: snake length around the left pill (e.g. a pod's GPU usage) |
+| `step`, `total`, `eta_s` | right pill: `step/total` + the ETA, counted down between writes |
+| `text` | right pill text instead of step / ETA |
+| `progress` | 0..1, a thin bar in the right pill (rows without a graph) |
+| `points` | `[[step, value], …]`: a ribbon graph over the whole run (x = step / `total`, so the line reaching the right edge = finished; y = 0..the largest value) |
+| `caption`, `metric` | ribbon captions: left (e.g. the GPU type), right = `metric` + the last value |
+| `colors` | graph gradient, left to right (default `["#8b5cf6", "#22d3ee"]`) |
+| `state` | `running` (default), `done` (green), `failed` (red) |
+
+At most 4 rows show. Cost: a watcher thread blocks on a folder change
+notification, so with no links the monitor never wakes for them and costs the
+same as without the feature. With links, the rows redraw at most once a second
+in their own window; their snakes share the existing frame pacer.
+
 ## Controls
 The window is click-through, so everything lives in the **tray icon**
 (right-click; left-click does nothing):
