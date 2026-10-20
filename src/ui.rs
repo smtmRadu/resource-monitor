@@ -766,9 +766,11 @@ impl Ui {
 
     fn gauge(&mut self, pix: &mut PixmapMut, b: BoxF, temp: Option<f32>) {
         let Some(raw) = temp else { return };
+        // On the snake's path (`snake_seg`): its right half runs where a snake rounds the
+        // capsule's right end, its left half closes the circle through the capsule.
         let (cx, cy) = (b.x + b.w - b.h / 2.0, b.y + b.h / 2.0);
-        let r = self.u(8.9);
-        let w = self.u(1.6);
+        let r = b.h / 2.0 - self.u(1.0);
+        let w = self.u(2.0);
         if let Some(p) = draw::arc_path(cx, cy, r, r, 0.0, 360.0) {
             pix.stroke_path(&p, &draw::paint(col(0x39404e)), &draw::stroke(w, LineCap::Butt), Transform::identity(), None);
         }
@@ -777,7 +779,7 @@ impl Ui {
             // from 12 o'clock, clockwise
             if let Some(p) = draw::arc_path(cx, cy, r, r, 90.0, -frac * 360.0) {
                 let c = col(draw::usage_color(frac * 100.0));
-                pix.stroke_path(&p, &draw::paint(c), &draw::stroke(w, LineCap::Round), Transform::identity(), None);
+                pix.stroke_path(&p, &draw::paint(c), &draw::stroke(w, LineCap::Butt), Transform::identity(), None);
             }
         }
         if raw > 99.0 {
