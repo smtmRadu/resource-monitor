@@ -129,6 +129,8 @@ struct App {
     bar: Option<RECT>,
     displays: usize,
     visible: bool,
+    /// When the window was hidden: on Show the ribbons get that many unmeasured steps.
+    hidden_at: Option<Instant>,
     last_frame: Instant,
     anim_on: bool,
     taskbar_created: u32,
@@ -235,6 +237,7 @@ pub fn run() {
                 bar: None,
                 displays,
                 visible: true,
+                hidden_at: None,
                 last_frame: Instant::now(),
                 anim_on: false,
                 taskbar_created,
@@ -386,6 +389,12 @@ impl App {
 
     fn set_visible(&mut self, v: bool) {
         self.visible = v;
+        crate::metrics::set_paused(!v);
+        if !v {
+            self.hidden_at = Some(Instant::now());
+        } else if let Some(t) = self.hidden_at.take() {
+            self.ui.gap(t.elapsed().as_secs_f32().round() as usize);
+        }
         let cmd = if v { SW_SHOWNOACTIVATE } else { SW_HIDE };
         // Hidden: the Exclusive strip is released (nothing to show in it).
         self.place();
@@ -490,7 +499,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_TIMER if wp.0 == TIMER_TOPMOST => {
             with_app(|a| {
-                a.raise();
+                if a.visible {
+                    a.raise();
+                }
                 crate::update::tick(a.main.hwnd);
                 if !a.tray_ok {
                     // Shell not ready yet at logon: keep trying every 2s.

@@ -8,7 +8,8 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{FILETIME, HWND};
+use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
 use crate::metrics::{self, Gpu, Snapshot};
 use crate::ui::Ui;
@@ -26,6 +27,14 @@ fn save(ui: &mut Ui, dir: &Path, name: &str, report: &mut String) {
     let path = dir.join(format!("{name}_{}x{}.rgba", f.width(), f.height()));
     let _ = std::fs::write(path, f.data());
     let _ = writeln!(report, "{name}: {}x{} full render {:?}", f.width(), f.height(), el);
+}
+
+/// This process's CPU time (kernel + user), ms.
+fn cpu_ms() -> u64 {
+    let (mut c, mut e, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+    let _ = unsafe { GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u) };
+    let ms = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) / 10_000;
+    ms(k) + ms(u)
 }
 
 fn synth(game: bool) -> Snapshot {
@@ -82,6 +91,22 @@ pub fn run(dir: &str) {
     }
     ui.step(0.5);
     save(&mut ui, dir, "live", &mut report);
+
+    // Hidden window: the sampler parks, so the process does no work.
+    metrics::set_paused(true);
+    std::thread::sleep(Duration::from_millis(1500)); // it notices within one tick
+    let _ = metrics::take_latest();
+    let c0 = cpu_ms();
+    std::thread::sleep(Duration::from_secs(5));
+    let (paused, stale) = (cpu_ms() - c0, metrics::take_latest().is_some());
+    metrics::set_paused(false);
+    let (c0, t) = (cpu_ms(), Instant::now());
+    let mut k = 0;
+    while t.elapsed() < Duration::from_secs(5) {
+        k += metrics::take_latest().is_some() as u32;
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let _ = writeln!(report, "cpu over 5s: paused {paused} ms (sample while paused: {stale}), running {} ms, {k} samples after resume", cpu_ms() - c0);
 
     // Synthetic: every element on, snakes rotated a bit.
     for _ in 0..8 {
@@ -141,6 +166,17 @@ pub fn run(dir: &str) {
         ui.base();
     }
     let _ = writeln!(report, "sample + fade frame avg {:?}", t.elapsed() / 20);
+    // Window hidden 15 s: hatched span on every ribbon, then the lines resume.
+    for k in 0..30 {
+        ui.apply(&Snapshot { cpu: 40.0 + 30.0 * (k as f32 * 0.5).sin(), ..synth(false) });
+    }
+    ui.gap(15);
+    save(&mut ui, dir, "gap_open", &mut report);
+    for k in 0..10 {
+        ui.apply(&Snapshot { cpu: 50.0 + 25.0 * (k as f32 * 0.7).cos(), ..synth(false) });
+    }
+    ui.step(0.5);
+    save(&mut ui, dir, "gap", &mut report);
     metrics::stop();
 
     // Tray version item (normal + hover), up to date and with an update.

@@ -68,8 +68,8 @@ fn kill(c: &mut Capture, wait: bool) {
     end_session(wait);
 }
 
-/// Game gone: stop capturing (no-op when nothing runs).
-fn stop_capture() {
+/// Game gone or window hidden: stop capturing (no-op when nothing runs).
+pub fn stop_capture() {
     if let Ok(mut s) = STATE.lock() {
         if let Some(mut c) = s.cap.take() {
             kill(&mut c, false);

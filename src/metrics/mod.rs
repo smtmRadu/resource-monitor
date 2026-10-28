@@ -22,7 +22,8 @@ mod pdh;
 mod presentmon;
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::thread::Thread;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -78,6 +79,9 @@ pub struct Info {
 static LATEST: Mutex<Option<Snapshot>> = Mutex::new(None);
 static HWND_TARGET: AtomicIsize = AtomicIsize::new(0);
 static STOP: AtomicBool = AtomicBool::new(false);
+/// Window hidden: the sampler parks (no sampling, no helper processes).
+static PAUSED: AtomicBool = AtomicBool::new(false);
+static SAMPLER: OnceLock<Thread> = OnceLock::new();
 
 pub fn take_latest() -> Option<Snapshot> {
     LATEST.lock().ok()?.take()
@@ -98,14 +102,28 @@ pub fn info() -> Info {
 /// Spawn the sampler; it posts `msg` to `hwnd` whenever a fresh snapshot is ready.
 pub fn start(hwnd: HWND, msg: u32) {
     HWND_TARGET.store(hwnd.0 as isize, Ordering::SeqCst);
-    std::thread::Builder::new()
+    let t = std::thread::Builder::new()
         .name("sampler".into())
         .spawn(move || sampler(msg))
         .expect("sampler thread");
+    let _ = SAMPLER.set(t.thread().clone());
+}
+
+/// Hidden window: stop sampling until shown again.
+pub fn set_paused(p: bool) {
+    PAUSED.store(p, Ordering::Release);
+    if !p {
+        if let Some(t) = SAMPLER.get() {
+            t.unpark();
+        }
+    }
 }
 
 pub fn stop() {
     STOP.store(true, Ordering::SeqCst);
+    if let Some(t) = SAMPLER.get() {
+        t.unpark();
+    }
     presentmon::stop();
     lhm::stop();
 }
@@ -133,6 +151,21 @@ fn sampler(msg: u32) {
     // CPU/PDH/net deltas need a baseline: prime, then first real sample 1s later.
     std::thread::sleep(Duration::from_millis(1000));
     while !STOP.load(Ordering::SeqCst) {
+        if PAUSED.load(Ordering::Acquire) {
+            lhm::ensure(false);
+            presentmon::stop_capture();
+            crate::log::log("sampler paused");
+            while PAUSED.load(Ordering::Acquire) && !STOP.load(Ordering::SeqCst) {
+                std::thread::park();
+            }
+            crate::log::log("sampler resumed");
+            // Deltas would average over the pause: new baseline, first real sample 1s later.
+            cpu.sample();
+            pdh.sample();
+            net.sample();
+            std::thread::sleep(Duration::from_millis(1000));
+            continue;
+        }
         let t0 = Instant::now();
         n += 1;
         let (cpu_total, cores) = cpu.sample();

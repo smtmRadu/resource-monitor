@@ -29,6 +29,7 @@ const LINES_FPS: f32 = 30.0; // ribbon scroll redraw rate (slow motion; more buy
 /// Ribbon grid lines and the contours drawn in the same color.
 const GRID: u32 = 0x232833;
 const TRACK_LBL: u32 = 0x5c6370; // ribbon captions (model names, Hz): quieter than MUTED
+const HATCH_A: f32 = 0.22; // unmeasured span (window was hidden): TRACK_LBL stripes at this alpha
 const NET_UP: u32 = 0xc084fc; // upload: arrow, ribbon line, snake
 const NET_MAX_MBS: f32 = 100.0; // ETH snakes reach full length (half the perimeter each) here
 /// Explorer's "low space" rule: red bar once a drive is over 90% full.
@@ -56,6 +57,28 @@ fn name(g: Glyph) -> &'static str {
 }
 
 /// Used share of all fixed drives together (bytes-weighted), 0..1.
+/// Clip a left-to-right polyline to x0..=x1, interpolating the crossing points.
+fn clip_x(pts: &[(f32, f32)], x0: f32, x1: f32) -> Vec<(f32, f32)> {
+    let at = |(ax, ay): (f32, f32), (bx, by): (f32, f32), x: f32| (x, ay + (by - ay) * (x - ax) / (bx - ax).max(1e-3));
+    let mut out = Vec::with_capacity(pts.len() + 2);
+    for (k, &p) in pts.iter().enumerate() {
+        let q = k.checked_sub(1).map(|j| pts[j]);
+        if let Some(q) = q.filter(|q| q.0 < x0 && p.0 > x0) {
+            out.push(at(q, p, x0));
+        }
+        if p.0 > x1 {
+            if let Some(q) = q.filter(|q| q.0 < x1) {
+                out.push(at(q, p, x1));
+            }
+            break;
+        }
+        if p.0 >= x0 {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// Add ribbon `b`'s interior (inside its contour) to the line clip mask; `s` = scale.
 fn track_clip(m: &mut tiny_skia::Mask, b: BoxF, s: f32) {
     let (k, lw) = (2.0 * s, s.round().max(1.0));
@@ -410,6 +433,22 @@ impl Ui {
         self.phase = 0.0;
         self.fade_next = true;
         self.dirty = true;
+    }
+
+    /// The window was hidden for `secs` (no samples): every ribbon gets that many
+    /// unmeasured steps (NaN, drawn hatched) and resumes at the next sample.
+    pub fn gap(&mut self, secs: usize) {
+        for h in self.hist.iter_mut().filter(|h| !h.is_empty()) {
+            for _ in 0..secs.min(HIST + 1) {
+                if h.len() > HIST {
+                    h.pop_front();
+                }
+                h.push_back(f32::NAN);
+            }
+        }
+        self.phase = 1.0;
+        self.dirty = true;
+        self.lines_dirty = true;
     }
 
     // ------------------------------------------------------------- rendering
@@ -876,48 +915,77 @@ impl Ui {
         let (x0, x1) = (b.x + m, b.x + b.w - m);
         let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
         let (step, ph) = ((x1 - x0) / (HIST as f32 - 1.0), self.phase);
-        let line = |pix: &mut PixmapMut, vals: &VecDeque<f32>, c: u32| {
+        let line = |pix: &mut PixmapMut, vals: &VecDeque<f32>, c: u32, hatch: bool| {
             let n = vals.len();
             if n < 2 {
                 return;
             }
-            let mut pts: Vec<(f32, f32)> =
-                vals.iter().take(n - 1).enumerate().map(|(i, &v)| (x1 - ((n - 2 - i) as f32 + ph) * step, gy(v))).collect();
-            pts.push((x1, gy(vals[n - 2] + (vals[n - 1] - vals[n - 2]) * ph)));
-            // Clip the tail exactly at the left edge.
-            if let Some(k) = pts.iter().position(|p| p.0 >= x0) {
-                if k > 0 {
-                    let ((ax, ay), (bx, by)) = (pts[k - 1], pts[k]);
-                    let t = (x0 - ax) / (bx - ax).max(1e-3);
-                    pts.drain(..k - 1);
-                    pts[0] = (x0, ay + (by - ay) * t);
+            // Sample k sits at x(k); the newest is still right of x1, so clipping at x1
+            // gives the head easing from the previous sample by `ph`.
+            let x = |k: f32| x1 - (n as f32 - 2.0 - k + ph) * step;
+            // Runs of measured samples, and the unmeasured spans (NaN, see `gap`) between them.
+            let (mut runs, mut holes) = (Vec::new(), Vec::new());
+            let mut k = 0;
+            while k < n {
+                let (a, hole) = (k, vals[k].is_nan());
+                while k < n && vals[k].is_nan() == hole {
+                    k += 1;
+                }
+                if hole {
+                    // From the last sample before to the first after: the stretch nobody measured.
+                    holes.push((x(a as f32 - 1.0), x(k as f32)));
+                } else {
+                    let pts = clip_x(&(a..k).map(|i| (x(i as f32), gy(vals[i]))).collect::<Vec<_>>(), x0, x1);
+                    if pts.len() >= 2 {
+                        runs.push(pts);
+                    }
                 }
             }
-            // Area under the line: the line color fading out toward the 0% line.
-            let mut area = pts.clone();
-            area.extend([(x1, b.y + b.h), (pts[0].0, b.y + b.h)]);
-            // Fade from the line's highest point, so low lines get a visible fill too.
-            let top = pts.iter().map(|p| p.1).fold(f32::MAX, f32::min).min(gy(0.0) - 1.0);
-            let shade = LinearGradient::new(
-                Point::from_xy(0.0, top),
-                Point::from_xy(0.0, gy(0.0)),
-                vec![GradientStop::new(0.0, col_a(c, 0.30)), GradientStop::new(1.0, col_a(c, 0.0))],
-                SpreadMode::Pad,
-                Transform::identity(),
-            );
-            if let (Some(p), Some(shader)) = (draw::polyline(&area, true), shade) {
-                let mut paint = draw::paint(col(c));
-                paint.shader = shader;
-                pix.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), clip);
+            // Faint diagonal stripes, anchored to the span's start so they scroll with the data.
+            let (bot, h, sp) = (b.y + b.h, b.h, self.u(5.0));
+            let mut pb = tiny_skia::PathBuilder::new();
+            for &(anchor, end) in holes.iter().filter(|_| hatch) {
+                let (l, r) = (anchor.max(x0), end.min(x1));
+                let mut c = anchor + ((l - h - anchor) / sp).floor() * sp;
+                while c <= r {
+                    let (t0, t1) = ((l - c).max(0.0), (r - c).min(h));
+                    if t0 < t1 {
+                        pb.move_to(c + t0, bot - t0);
+                        pb.line_to(c + t1, bot - t1);
+                    }
+                    c += sp;
+                }
             }
-            if let Some(p) = draw::polyline(&pts, false) {
-                pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), clip);
+            if let Some(p) = pb.finish() {
+                pix.stroke_path(&p, &draw::paint(col_a(TRACK_LBL, HATCH_A)), &draw::stroke(self.u(1.0), LineCap::Butt), Transform::identity(), clip);
+            }
+            // Fade from the lines' highest point, so low lines get a visible fill too.
+            let top = runs.iter().flatten().map(|p| p.1).fold(f32::MAX, f32::min).min(gy(0.0) - 1.0);
+            for pts in &runs {
+                // Area under the line: the line color fading out toward the 0% line.
+                let mut area = pts.clone();
+                area.extend([(pts[pts.len() - 1].0, b.y + b.h), (pts[0].0, b.y + b.h)]);
+                let shade = LinearGradient::new(
+                    Point::from_xy(0.0, top),
+                    Point::from_xy(0.0, gy(0.0)),
+                    vec![GradientStop::new(0.0, col_a(c, 0.30)), GradientStop::new(1.0, col_a(c, 0.0))],
+                    SpreadMode::Pad,
+                    Transform::identity(),
+                );
+                if let (Some(p), Some(shader)) = (draw::polyline(&area, true), shade) {
+                    let mut paint = draw::paint(col(c));
+                    paint.shader = shader;
+                    pix.fill_path(&p, &paint, FillRule::Winding, Transform::identity(), clip);
+                }
+                if let Some(p) = draw::polyline(pts, false) {
+                    pix.stroke_path(&p, &draw::paint(col(c)), &draw::stroke(self.u(2.0), LineCap::Round), Transform::identity(), clip);
+                }
             }
         };
         let i = idx(g);
-        line(pix, &self.hist[i], self.accent[i]);
+        line(pix, &self.hist[i], self.accent[i], true);
         if g == Glyph::Net {
-            line(pix, &self.hist[8], NET_UP);
+            line(pix, &self.hist[8], NET_UP, false); // same gaps as download: hatch once
         }
     }
 

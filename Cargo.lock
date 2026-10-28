@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "resource-monitor-rs"
-version = "0.3.5"
+version = "0.3.7"
 dependencies = [
  "libloading",
  "serde_json",
