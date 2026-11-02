@@ -336,7 +336,7 @@ impl Ui {
         v.cpu_sub = s.cpu_watts.map(|w| format!("{w:.0}W")).unwrap_or_default();
         v.cpu_temp = s.cpu_temp;
         v.cores.clone_from(&s.cores);
-        v.ram = format!("{} {:.1}/{:.0}G", pct(s.ram_pct), s.ram_used_gb, s.ram_total_gb);
+        v.ram = format!("{} {:.1}/{:.1}G", pct(s.ram_pct), s.ram_used_gb, s.ram_total_gb);
         let g = &s.gpu;
         v.gpu_main = g.util.map(pct).unwrap_or_else(|| "--".into());
         v.gpu_sub = match (g.watts, g.limit_w) {
@@ -350,7 +350,7 @@ impl Ui {
             _ => None,
         };
         v.vram = vpct
-            .map(|(p, u, t)| format!("{} {:.1}/{:.0}G", pct(p), u / 1024.0, t / 1024.0))
+            .map(|(p, u, t)| format!("{} {:.1}/{:.1}G", pct(p), u / 1024.0, t / 1024.0))
             .unwrap_or_else(|| "--".into());
         // iGPU row: visible on activity, hidden after 5s at 0%.
         match s.igpu {
