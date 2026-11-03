@@ -6,7 +6,7 @@
 //! snakes live in a separate, narrow `overlay` layer redrawn every frame.
 use std::collections::VecDeque;
 
-use tiny_skia::{FillRule, GradientStop, LineCap, LinearGradient, Pixmap, PixmapMut, Point, SpreadMode, Transform};
+use tiny_skia::{FillRule, GradientStop, LineCap, LinearGradient, PathBuilder, Pixmap, PixmapMut, Point, RadialGradient, SpreadMode, Transform};
 
 use crate::draw::{self, Glyph, MUTED, PILL, RED, TXT, WATT};
 use crate::metrics::{Drive, Info, Snapshot, Vendor};
@@ -25,6 +25,10 @@ const DEV_H: f32 = 20.0;
 const ROW_ANIM_S: f32 = 0.3; // row collapse / expand duration
 const SAMPLE_S: f32 = 1.0; // metrics period: one ribbon step
 const FADE_S: f32 = 0.3; // old -> new values crossfade after each sample
+/// Fire glyph frame rate: a flicker reads fine at this, and it costs a base push per frame.
+pub const FLAME_FPS: f32 = 12.0;
+/// Fire loop length (frames): all its motion repeats seamlessly after this.
+const FLAME_WRAP: u32 = 512;
 const LINES_FPS: f32 = 30.0; // ribbon scroll redraw rate (slow motion; more buys nothing) // "developer mode" line under the rows (dev builds)
 /// Ribbon grid lines and the contours drawn in the same color.
 const GRID: u32 = 0x232833;
@@ -96,6 +100,37 @@ fn col(hex: u32) -> tiny_skia::Color {
 
 fn col_a(hex: u32, a: f32) -> tiny_skia::Color {
     draw::col_a(((hex & 0xff) << 16) | (hex & 0xff00) | ((hex >> 16) & 0xff), a)
+}
+
+/// Fire palette for intensity 0..1: deep red, red, orange, yellow, pale yellow.
+fn fire_color(i: f32) -> [f32; 3] {
+    const STOPS: [(f32, [f32; 3]); 5] = [
+        (0.0, [120.0, 10.0, 5.0]),
+        (0.25, [239.0, 68.0, 68.0]),
+        (0.5, [249.0, 115.0, 22.0]),
+        (0.75, [250.0, 204.0, 21.0]),
+        (1.0, [254.0, 249.0, 195.0]),
+    ];
+    let k = STOPS.iter().rposition(|&(a, _)| a <= i).unwrap_or(0).min(STOPS.len() - 2);
+    let ((a, ca), (b, cb)) = (STOPS[k], STOPS[k + 1]);
+    let t = ((i - a) / (b - a)).clamp(0.0, 1.0);
+    std::array::from_fn(|j| ca[j] + (cb[j] - ca[j]) * t)
+}
+
+/// Smooth value noise in 0..1 on a 256-periodic lattice (the flame scroll wraps seamlessly).
+fn vnoise(x: f32, y: f32) -> f32 {
+    let (fx, fy) = (x.floor(), y.floor());
+    let (tx, ty) = (x - fx, y - fy);
+    let (sx, sy) = (tx * tx * (3.0 - 2.0 * tx), ty * ty * (3.0 - 2.0 * ty));
+    let (ix, iy) = (fx as i32 as u32, fy as i32 as u32);
+    let hash = |x: u32, y: u32| {
+        let h = (x & 255).wrapping_mul(374_761_393).wrapping_add((y & 255).wrapping_mul(668_265_263));
+        let h = (h ^ (h >> 13)).wrapping_mul(1_274_126_177);
+        ((h ^ (h >> 16)) & 0xffff) as f32 / 65535.0
+    };
+    let top = hash(ix, iy) + (hash(ix + 1, iy) - hash(ix, iy)) * sx;
+    let bot = hash(ix, iy + 1) + (hash(ix + 1, iy + 1) - hash(ix, iy + 1)) * sx;
+    top + (bot - top) * sy
 }
 
 fn pct(v: f32) -> String {
@@ -179,6 +214,9 @@ pub struct Ui {
     gauge_boxes: Vec<(usize, BoxF)>,
     /// Shown CPU / GPU temperatures, easing toward the sampled ones.
     temps: [Option<f32>; 2],
+    /// Fire glyph clock (s, wraps every FLAME_WRAP frames) and the frame it shows.
+    flame_t: f32,
+    flame_frame: u32,
     /// Rendering an off-screen block (collapsing row): draw gauges in place.
     baking: bool,
     /// 0..1 progress from the last sample toward the next: lines scroll by it.
@@ -257,6 +295,8 @@ impl Ui {
             track_boxes: Vec::new(),
             gauge_boxes: Vec::new(),
             temps: [None, None],
+            flame_t: 0.0,
+            flame_frame: 0,
             baking: false,
             phase: 1.0,
             line_acc: 0.0,
@@ -785,9 +825,9 @@ impl Ui {
     }
 
     /// Temperature ring on the capsule's right end disc; fire glyph above 99°.
-    /// Temperature ring: drawn per frame by `compose` while it eases, else baked in place.
+    /// Temperature ring: drawn per frame by `compose` while it eases or burns, else baked in place.
     fn gauge_slot(&mut self, pix: &mut PixmapMut, b: BoxF, k: usize) {
-        if self.baking || !self.gauge_moving(k) {
+        if self.baking || !self.gauge_live(k) {
             self.gauge(pix, b, self.temps[k]);
         } else {
             self.gauge_boxes.push((k, b));
@@ -801,6 +841,21 @@ impl Ui {
             (Some(g), Some(t)) => (g - t).abs() > 0.05,
             (g, t) => g.is_some() != t.is_some(),
         }
+    }
+
+    /// Ring `k` shows the animated flame (above 99°).
+    fn burning_k(&self, k: usize) -> bool {
+        self.temps[k].is_some_and(|t| t > 99.0)
+    }
+
+    /// Some ring shows the flame: the app drives FLAME_FPS frames when nothing else animates.
+    pub fn burning(&self) -> bool {
+        self.burning_k(0) || self.burning_k(1)
+    }
+
+    /// Ring `k` is drawn per frame by `compose`: easing, or burning.
+    fn gauge_live(&self, k: usize) -> bool {
+        self.gauge_moving(k) || self.burning_k(k)
     }
 
     fn gauge(&mut self, pix: &mut PixmapMut, b: BoxF, temp: Option<f32>) {
@@ -822,19 +877,62 @@ impl Ui {
             }
         }
         if raw > 99.0 {
-            let s = self.s;
-            let flame = [(-4.0, 5.0), (-4.2, 1.0), (-2.5, -1.0), (-3.2, -3.5), (-0.5, -6.0), (1.5, -2.5), (4.0, -0.5), (3.5, 5.0)];
-            let ember = [(-1.5, 4.0), (-1.8, 1.0), (0.0, -1.5), (1.8, 1.5), (1.5, 4.0)];
-            for (pts, c) in [(&flame[..], RED), (&ember[..], 0xfacc15)] {
-                let v: Vec<(f32, f32)> = pts.iter().map(|&(x, y)| (cx + x * s, cy + y * s)).collect();
-                if let Some(p) = draw::polyline(&v, true) {
-                    pix.fill_path(&p, &draw::paint(col(c)), FillRule::Winding, Transform::identity(), None);
-                }
-            }
+            self.flame(pix, cx, cy, r - w / 2.0);
         } else {
             let t = format!("{}", raw.round().clamp(0.0, 99.0) as i32);
             let fnum = self.font_num();
             self.label(pix, fnum, &t, cx, cy, TXT, Anchor::Center);
+        }
+    }
+
+    /// Fire glyph inside a ring of inner radius `r`: a breathing red glow under a fire
+    /// drawn per pixel: value-noise turbulence rising through a column that narrows
+    /// with height and grows out of the ring's bottom. Every motion repeats each
+    /// FLAME_WRAP frames (whole cycles, 256-cell noise lattice), so the loop is seamless.
+    fn flame(&self, pix: &mut PixmapMut, cx: f32, cy: f32, r: f32) {
+        let f = self.flame_frame as f32;
+        let ph = f / FLAME_WRAP as f32 * std::f32::consts::TAU;
+        let a = 0.32 + 0.18 * (ph * 34.0).sin();
+        let stops = vec![GradientStop::new(0.0, col_a(RED, a)), GradientStop::new(1.0, col_a(RED, 0.0))];
+        let c = Point::from_xy(cx, cy);
+        if let (Some(sh), Some(disc)) = (RadialGradient::new(c, 0.0, c, r, stops, SpreadMode::Pad, Transform::identity()), PathBuilder::from_circle(cx, cy, r)) {
+            let mut p = draw::paint(col(RED));
+            p.shader = sh;
+            pix.fill_path(&disc, &p, FillRule::Winding, Transform::identity(), None);
+        }
+        let sway = 0.25 * (0.6 * (ph * 37.0).sin() + 0.4 * (ph * 61.0).sin());
+        let scroll = f * 256.0 / FLAME_WRAP as f32;
+        let (w, h) = (pix.width() as i32, pix.height() as i32);
+        let (x0, x1) = (((cx - r).floor() as i32).max(0), ((cx + r).ceil() as i32 + 1).min(w));
+        let (y0, y1) = (((cy - r).floor() as i32).max(0), ((cy + r).ceil() as i32 + 1).min(h));
+        let data = pix.data_mut();
+        for py in y0..y1 {
+            // v: -1 top .. 1 bottom (ring units); up: 0 at the bottom .. 1 at the top.
+            let dy = py as f32 + 0.5 - cy;
+            let (v, up) = (dy / r, (r - dy) / (2.0 * r));
+            let width = 0.8 * (1.0 - up).clamp(0.0, 1.0).powf(0.8) + 0.05;
+            let fade = ((0.95 - up) / 0.25).clamp(0.0, 1.0);
+            for px in x0..x1 {
+                let dx = px as f32 + 0.5 - cx;
+                let cover = (r - (dx * dx + dy * dy).sqrt() + 0.5).clamp(0.0, 1.0);
+                let u = dx / r + sway * up;
+                let shape = 1.0 - u.abs() / width;
+                if cover <= 0.0 || shape < -0.65 {
+                    continue; // noise adds at most +0.65: no fire here
+                }
+                let n = 0.65 * vnoise(u * 2.2 + 10.0, v * 1.6 + scroll) + 0.35 * vnoise(u * 4.4 + 20.0, v * 3.2 + 2.0 * scroll);
+                let i = ((shape - up * 0.75 + (n - 0.5) * 1.3) * fade).clamp(0.0, 1.0);
+                let al = (i / 0.25).min(1.0) * cover;
+                if al <= 0.0 {
+                    continue;
+                }
+                let [cr, cg, cb] = fire_color(i);
+                let o = (py * w + px) as usize * 4;
+                // Premultiplied BGRA, source over.
+                for (d, s) in data[o..o + 4].iter_mut().zip([cb, cg, cr, 255.0]) {
+                    *d = (s * al + *d as f32 * (1.0 - al)).round() as u8;
+                }
+            }
         }
     }
 
@@ -999,16 +1097,18 @@ impl Ui {
             s.len += (s.target - s.len) * ease;
         }
         // Temperature rings ease like the snakes: arc, color and number move together.
+        // Above 99° the flame flickers: the ring stays live (unbaked) until it cools down.
+        self.flame_t = (self.flame_t + dt) % (FLAME_WRAP as f32 / FLAME_FPS);
         let mut gauges = false;
         for (k, target) in [self.v.cpu_temp, self.v.gpu_temp].into_iter().enumerate() {
-            let was = self.gauge_moving(k);
+            let was = self.gauge_live(k);
             let t = &mut self.temps[k];
             *t = match (*t, target) {
                 (Some(c), Some(g)) if (g - c).abs() > 0.05 => Some(c + (g - c) * ease),
                 _ => target,
             };
             gauges |= self.gauge_moving(k);
-            if was && !self.gauge_moving(k) {
+            if was && !self.gauge_live(k) {
                 self.dirty = true; // settled: bake it into the static layer
                 self.lines_dirty = true;
             }
@@ -1028,6 +1128,12 @@ impl Ui {
                 self.line_acc = 0.0;
                 self.lines_dirty = true;
             }
+        }
+        // The flame steps at FLAME_FPS: it rides the 30 fps clock when that runs, else redraws alone.
+        let frame = (self.flame_t * FLAME_FPS) as u32 % FLAME_WRAP;
+        if frame != self.flame_frame {
+            self.flame_frame = frame;
+            self.lines_dirty |= self.burning() && !(scrolling || gauges);
         }
         let d = dt / ROW_ANIM_S;
         for (i, &g) in ROWS.iter().enumerate() {

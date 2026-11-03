@@ -12,7 +12,7 @@ use windows::Win32::Foundation::{FILETIME, HWND};
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
 use crate::metrics::{self, Gpu, Snapshot};
-use crate::ui::Ui;
+use crate::ui::{Ui, FLAME_FPS};
 
 fn save(ui: &mut Ui, dir: &Path, name: &str, report: &mut String) {
     let t = Instant::now();
@@ -116,6 +116,12 @@ pub fn run(dir: &str) {
         ui.step(0.042);
     }
     save(&mut ui, dir, "synth", &mut report);
+    // Fire glyph (GPU at 101°): consecutive flicker frames.
+    let frames: usize = std::env::var("RM_FIRE_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    for i in 0..frames {
+        ui.step(1.0 / FLAME_FPS);
+        save(&mut ui, dir, &format!("fire{i:03}"), &mut report);
+    }
     ui.apply(&synth(true));
     ui.step(0.4);
     save(&mut ui, dir, "game", &mut report);
@@ -166,6 +172,17 @@ pub fn run(dir: &str) {
         ui.base();
     }
     let _ = writeln!(report, "sample + fade frame avg {:?}", t.elapsed() / 20);
+    // Flame alone (track off, FLAME_FPS timer): static layer copy + rings per frame.
+    ui.track = false;
+    ui.invalidate();
+    ui.base();
+    let t = Instant::now();
+    for _ in 0..24 {
+        ui.step(1.0 / FLAME_FPS);
+        ui.base();
+    }
+    let _ = writeln!(report, "flame frame avg {:?} at {FLAME_FPS} fps", t.elapsed() / 24);
+    ui.track = true;
     // Window hidden 15 s: hatched span on every ribbon, then the lines resume.
     for k in 0..30 {
         ui.apply(&Snapshot { cpu: 40.0 + 30.0 * (k as f32 * 0.5).sin(), ..synth(false) });

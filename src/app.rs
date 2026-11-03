@@ -45,6 +45,8 @@ const WM_APP_SHOW: u32 = WM_APP + 5;
 /// AppBar notifications from the shell (Exclusive mode).
 const WM_APP_BAR: u32 = WM_APP + 6;
 const TIMER_TOPMOST: usize = 2;
+/// Fire glyph frames while nothing else animates (the pacer would wake at 60 Hz).
+const TIMER_FLAME: usize = 3;
 const WINDOW_ALPHA: u8 = 237; // 0.93
 
 /// A layered window plus its 32bpp DIB.
@@ -133,6 +135,7 @@ struct App {
     hidden_at: Option<Instant>,
     last_frame: Instant,
     anim_on: bool,
+    flame_on: bool,
     taskbar_created: u32,
     /// Tray icon present; the only way to control the app, so retry until it is.
     tray_ok: bool,
@@ -240,6 +243,7 @@ pub fn run() {
                 hidden_at: None,
                 last_frame: Instant::now(),
                 anim_on: false,
+                flame_on: false,
                 taskbar_created,
                 tray_ok: false,
             })
@@ -371,6 +375,19 @@ impl App {
             }
             self.anim_on = want;
         }
+        // Flame alone: a FLAME_FPS timer drives it; with the pacer on, it rides those frames.
+        let flame = self.visible && !want && self.ui.burning();
+        if flame != self.flame_on {
+            unsafe {
+                if flame {
+                    self.last_frame = Instant::now();
+                    SetTimer(Some(self.main.hwnd), TIMER_FLAME, (1000.0 / crate::ui::FLAME_FPS) as u32, None);
+                } else {
+                    let _ = KillTimer(Some(self.main.hwnd), TIMER_FLAME);
+                }
+            }
+            self.flame_on = flame;
+        }
     }
 
     fn animate(&mut self) {
@@ -495,6 +512,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
         }
         WM_APP_CMD => {
             with_app(|a| a.command(wp.0 as u32));
+            LRESULT(0)
+        }
+        WM_TIMER if wp.0 == TIMER_FLAME => {
+            with_app(|a| a.animate());
             LRESULT(0)
         }
         WM_TIMER if wp.0 == TIMER_TOPMOST => {
