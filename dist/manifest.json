@@ -4,7 +4,7 @@
                   {
                       "path":  "resource-monitor-rs.exe",
                       "src":  "dist/resource-monitor-rs.exe",
-                      "sha256":  "c338d1088c5e830ad83e314fe19f2dd19ef24a0229c862801ac3d6a8c3c841a0"
+                      "sha256":  "2bccf4b2605e8e8904f8528b3be1351d9c8d9e331746bda3bc1207e60011b403"
                   },
                   {
                       "path":  "setup_task.ps1",

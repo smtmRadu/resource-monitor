@@ -174,8 +174,10 @@ fn sampler(msg: u32) {
         let mut g = nv.as_ref().map(|nv| nv.sample()).unwrap_or_default();
         if nv.is_none() {
             g.util = p.dgpu;
-            g.vram_used_mb = p.dgpu_vram_mb;
             g.vram_total_mb = adapters.iter().find(|a| a.is_dgpu).map(|a| a.dedicated_mb);
+        }
+        if g.vram_used_mb.is_none() {
+            g.vram_used_mb = p.dgpu_vram_mb; // no NVML, or NVML gave a bogus reading
         }
         let (down, up) = net.sample();
         let scan = games.tick();

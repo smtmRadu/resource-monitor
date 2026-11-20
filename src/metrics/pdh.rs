@@ -28,6 +28,8 @@ pub struct Pdh {
     vram: Option<PDH_HCOUNTER>,
     igpu_luid: Option<String>,
     dgpu_luid: Option<String>,
+    /// dGPU for the VRAM counter: always (fallback when NVML gives a bogus reading).
+    vram_luid: Option<String>,
     thermal: Option<PDH_HCOUNTER>,
     energy: Option<PDH_HCOUNTER>,
     /// Per thermal zone: distinct readings seen (tenths of K, capped list).
@@ -45,6 +47,7 @@ impl Pdh {
     /// `need_dgpu`: also derive dGPU load/VRAM here (no NVML on this system).
     pub fn new(adapters: &[Adapter], need_dgpu: bool) -> Self {
         let igpu_luid = adapters.iter().find(|a| a.is_igpu).map(|a| a.luid.clone());
+        let vram_luid = adapters.iter().find(|a| a.is_dgpu).map(|a| a.luid.clone());
         let dgpu_luid = if need_dgpu { adapters.iter().find(|a| a.is_dgpu).map(|a| a.luid.clone()) } else { None };
         let mut s = Self {
             query: PDH_HQUERY::default(),
@@ -53,6 +56,7 @@ impl Pdh {
             vram: None,
             igpu_luid,
             dgpu_luid,
+            vram_luid,
             thermal: None,
             energy: None,
             zones: HashMap::new(),
@@ -66,7 +70,7 @@ impl Pdh {
             if s.igpu_luid.is_some() || s.dgpu_luid.is_some() {
                 s.engines = s.add(r"\GPU Engine(*)\Utilization Percentage");
             }
-            if s.dgpu_luid.is_some() {
+            if s.vram_luid.is_some() {
                 s.vram = s.add(r"\GPU Adapter Memory(*)\Dedicated Usage");
             }
             s.thermal = s.add(r"\Thermal Zone Information(*)\High Precision Temperature");
@@ -100,7 +104,7 @@ impl Pdh {
                 out.igpu = get(&self.igpu_luid);
                 out.dgpu = get(&self.dgpu_luid);
             }
-            if let (Some(c), Some(l)) = (self.vram, &self.dgpu_luid) {
+            if let (Some(c), Some(l)) = (self.vram, &self.vram_luid) {
                 out.dgpu_vram_mb = array(c)
                     .into_iter()
                     .filter(|(n, _)| n.contains(l.as_str()))

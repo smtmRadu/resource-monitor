@@ -84,12 +84,18 @@ impl Nvml {
             // v2 "used" excludes driver-reserved memory, matching nvidia-smi.
             let mut m2 = Mem2 { version: std::mem::size_of::<Mem2>() as u32 | (2 << 24), ..Default::default() };
             let mut m1 = [0u64; 3];
-            if self.mem2.is_some_and(|f| f(self.dev, &mut m2) == 0) {
-                g.vram_used_mb = Some(m2.used as f32 / 1048576.0);
-                g.vram_total_mb = Some(m2.total as f32 / 1048576.0);
+            // The driver can report free > total (seen on a 4060 Laptop under CUDA load, also in nvidia-smi):
+            // used then wraps to ~2^64. Such a reading is dropped; the sampler falls back to the PDH counter.
+            let (used, total) = if self.mem2.is_some_and(|f| f(self.dev, &mut m2) == 0) {
+                (m2.used, m2.total)
             } else if (self.mem1)(self.dev, &mut m1) == 0 {
-                g.vram_used_mb = Some(m1[2] as f32 / 1048576.0);
-                g.vram_total_mb = Some(m1[0] as f32 / 1048576.0);
+                (m1[2], m1[0])
+            } else {
+                (u64::MAX, 0)
+            };
+            if total > 0 {
+                g.vram_total_mb = Some(total as f32 / 1048576.0);
+                g.vram_used_mb = (used <= total).then_some(used as f32 / 1048576.0);
             }
             let mut t = 0u32;
             if (self.temp)(self.dev, 0, &mut t) == 0 {
