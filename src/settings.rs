@@ -1,4 +1,4 @@
-//! Persisted tray choices (size, track ribbons, display, mode) in settings.json.
+//! Persisted tray choices (size, track ribbons, display, mode, stocks) in settings.json.
 use serde_json::{json, Value};
 
 #[derive(Clone, Copy)]
@@ -10,11 +10,13 @@ pub struct Settings {
     /// Mode: false = Overlayed (floats over windows), true = Exclusive (reserves
     /// a strip on the display's left edge; the usable area starts to its right).
     pub exclusive: bool,
+    /// Stocks > NVDA: the bottom-docked stock group and its poller (off by default: it uses the network).
+    pub nvda: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { scale: 1.0, track: true, display: 0, exclusive: false }
+        Self { scale: 1.0, track: true, display: 0, exclusive: false, nvda: false }
     }
 }
 
@@ -49,11 +51,14 @@ impl Settings {
         if let Some(x) = v.get("exclusive").and_then(Value::as_bool) {
             s.exclusive = x;
         }
+        if let Some(x) = v.get("nvda").and_then(Value::as_bool) {
+            s.nvda = x;
+        }
         s
     }
 
     pub fn save(&self) {
-        let v = json!({ "scale": self.scale, "track": self.track, "display": self.display, "exclusive": self.exclusive });
+        let v = json!({ "scale": self.scale, "track": self.track, "display": self.display, "exclusive": self.exclusive, "nvda": self.nvda });
         let _ = std::fs::write(crate::log::data_dir().join("settings.json"), v.to_string());
     }
 }

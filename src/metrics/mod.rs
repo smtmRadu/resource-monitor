@@ -60,6 +60,8 @@ pub struct Snapshot {
     pub drives: Vec<Drive>,
     pub net_down: f32,
     pub net_up: f32,
+    /// Latest NVDA quote (stock poller thread); None until the first reply.
+    pub stock: Option<crate::stock::Quote>,
 }
 
 /// Static facts the UI needs before the first sample (icon colors, core grid).
@@ -207,6 +209,7 @@ fn sampler(msg: u32) {
             drives: disks.sample(),
             net_down: down,
             net_up: up,
+            stock: crate::stock::latest(),
         };
         if n <= 3 {
             crate::log::log(&format!("tick {n} took {:?}: {snap:?}", t0.elapsed()));

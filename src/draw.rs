@@ -110,6 +110,44 @@ pub enum Glyph {
     Disk,
     Net,
     Fps,
+    /// NVDA stock row (its own window, docked above the taskbar).
+    Nvda,
+}
+
+/// NVIDIA's eye mark: the real logo outline (Wikimedia Commons "NVIDIA logo.svg", path21),
+/// in its own units (x 56.8..305.7, y 31.5..196.2).
+const NV_EYE: &str = "M82.2115,102.414C82.2115,102.414 104.7155,69.211 149.6485,65.777L149.6485,53.73C99.8795,57.727 56.7818,99.879 56.7818,99.879C56.7818,99.879 81.1915,170.445 149.6485,176.906L149.6485,164.102C99.4105,157.781 82.2115,102.414 82.2115,102.414zM149.6485,138.637L149.6485,150.363C111.6805,143.594 101.1415,104.125 101.1415,104.125C101.1415,104.125 119.3715,83.93 149.6485,80.656L149.6485,93.523C149.6255,93.523 149.6095,93.516 149.5905,93.516C133.6995,91.609 121.2855,106.453 121.2855,106.453C121.2855,106.453 128.2425,131.445 149.6485,138.637M149.6485,31.512L149.6485,53.73C151.1095,53.617 152.5705,53.523 154.0395,53.473C210.6215,51.566 247.4885,99.879 247.4885,99.879C247.4885,99.879 205.1455,151.367 161.0315,151.367C156.9885,151.367 153.2035,150.992 149.6485,150.363L149.6485,164.102C152.6885,164.488 155.8405,164.715 159.1295,164.715C200.1805,164.715 229.8675,143.75 258.6135,118.937C263.3795,122.754 282.8915,132.039 286.9025,136.105C259.5705,158.988 195.8715,177.434 159.7585,177.434C156.2775,177.434 152.9345,177.223 149.6485,176.906L149.6485,196.211L305.6805,196.211L305.6805,31.512L149.6485,31.512zM149.6485,80.656L149.6485,65.777C151.0945,65.676 152.5515,65.598 154.0395,65.551C194.7275,64.273 221.4225,100.516 221.4225,100.516C221.4225,100.516 192.5905,140.559 161.6765,140.559C157.2275,140.559 153.2385,139.844 149.6485,138.637L149.6485,93.523C165.4885,95.437 168.6765,102.434 178.1995,118.309L199.3795,100.449C199.3795,100.449 183.9185,80.172 157.8555,80.172C155.0205,80.172 152.3095,80.371 149.6485,80.656";
+
+/// Minimal SVG path reader: absolute M / L / C / Z only (all NV_EYE uses).
+fn svg_path(d: &str) -> Option<Path> {
+    let mut pb = PathBuilder::new();
+    let mut rest = d.trim();
+    while let Some(cmd) = rest.chars().next() {
+        let end = rest[1..].find(|c: char| c.is_ascii_alphabetic()).map_or(rest.len(), |i| i + 1);
+        let nums: Vec<f32> = rest[1..end].split(|c: char| c == ',' || c.is_whitespace()).filter_map(|t| t.parse().ok()).collect();
+        match cmd {
+            'M' => {
+                for (i, c) in nums.chunks_exact(2).enumerate() {
+                    if i == 0 {
+                        pb.move_to(c[0], c[1]);
+                    } else {
+                        pb.line_to(c[0], c[1]);
+                    }
+                }
+            }
+            'L' => nums.chunks_exact(2).for_each(|c| pb.line_to(c[0], c[1])),
+            'C' => nums.chunks_exact(6).for_each(|c| pb.cubic_to(c[0], c[1], c[2], c[3], c[4], c[5])),
+            'Z' | 'z' => pb.close(),
+            _ => return None,
+        }
+        rest = &rest[end..];
+    }
+    pb.finish()
+}
+
+fn nv_eye() -> Option<&'static Path> {
+    static EYE: std::sync::OnceLock<Option<Path>> = std::sync::OnceLock::new();
+    EYE.get_or_init(|| svg_path(NV_EYE)).as_ref()
 }
 
 /// Icon pen in the original 34x30 icon grid (box 4..28, center 17,15).
@@ -144,6 +182,19 @@ impl Pen<'_, '_> {
     }
     fn f(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
         if let Some(p) = Rect::from_ltrb(x1, y1, x2 + 1.0, y2 + 1.0).and_then(PathBuilder::from_oval) {
+            self.pix.fill_path(&p, &paint(self.c), FillRule::Winding, self.ts, None);
+        }
+    }
+    /// Quadratic curve; points already on pixel centers (no +0.5).
+    fn quad(&mut self, a: (f32, f32), c: (f32, f32), b: (f32, f32)) {
+        let mut pb = PathBuilder::new();
+        pb.move_to(a.0, a.1);
+        pb.quad_to(c.0, c.1, b.0, b.1);
+        self.stroke_path(pb.finish(), self.c, 1.0);
+    }
+    /// Filled disc; center already on pixel centers.
+    fn dot(&mut self, cx: f32, cy: f32, r: f32) {
+        if let Some(p) = PathBuilder::from_circle(cx, cy, r) {
             self.pix.fill_path(&p, &paint(self.c), FillRule::Winding, self.ts, None);
         }
     }
@@ -183,10 +234,14 @@ pub fn icon(pix: &mut PixmapMut, g: Glyph, tx: f32, ty: f32, s: f32, c: Color) {
         Glyph::Gpu => {
             p.r(7., 10., 28., 20.);
             p.o(17., 11., 25., 19.);
-            for (dx, dy) in [(-2.2, -2.2), (2.2, -2.2), (-2.2, 2.2), (2.2, 2.2)] {
-                p.l(21., 15., 21. + dx, 15. + dy);
+            // Fan: 4 swept blades (a spiral) around the hub.
+            let (cx, cy, r) = (21.5f32, 15.5f32, 4.0f32);
+            let at = |a: f32, d: f32| (cx + d * a.cos(), cy + d * a.sin());
+            for k in 0..4 {
+                let a = (k as f32 * 90.0 - 90.0).to_radians();
+                p.quad(at(a, 1.2), at(a + 0.3, r * 0.85), at(a + 1.05, r - 0.4));
             }
-            p.f(20., 14., 22., 16.);
+            p.dot(cx, cy, 1.0);
             p.r(9., 13., 15., 17.);
             p.l(6., 9., 6., 21.);
             for x in [14., 11.] {
@@ -232,6 +287,15 @@ pub fn icon(pix: &mut PixmapMut, g: Glyph, tx: f32, ty: f32, s: f32, c: Color) {
             p.l(17., 7., 17., 10.);
             p.l(17., 15., 21., 8.5);
             p.f(16., 14., 18., 16.);
+        }
+        Glyph::Nvda => {
+            // The eye mark, 20x13 grid px centered on the icon box, as a thin outline.
+            if let Some(eye) = nv_eye() {
+                let fit = Transform::from_translate(17.5, 15.5).pre_scale(0.08, 0.08).pre_translate(-181.25, -113.86);
+                if let Some(path) = eye.clone().transform(p.ts.pre_concat(fit)) {
+                    p.pix.stroke_path(&path, &paint(p.c), &stroke(0.7 * s, LineCap::Butt), Transform::identity(), None);
+                }
+            }
         }
     }
 }

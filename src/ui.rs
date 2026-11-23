@@ -10,6 +10,7 @@ use tiny_skia::{FillRule, GradientStop, LineCap, LinearGradient, PathBuilder, Pi
 
 use crate::draw::{self, Glyph, MUTED, PILL, RED, TXT, WATT};
 use crate::metrics::{Drive, Info, Snapshot, Vendor};
+use crate::stock::Session;
 use crate::text::{Anchor, Text};
 
 const PILL_H: f32 = 24.0;
@@ -41,7 +42,22 @@ const LOW_SPACE_USED: f32 = 0.90;
 const BG_NORMAL: f32 = 1.0;
 const BG_GAME: f32 = 0.25; // pill backgrounds fade in game mode; text stays solid
 
-const ROWS: [Glyph; 8] = [Glyph::Cpu, Glyph::Ram, Glyph::Gpu, Glyph::Vram, Glyph::Igpu, Glyph::Disk, Glyph::Net, Glyph::Fps];
+const ROWS: [Glyph; 9] = [Glyph::Cpu, Glyph::Ram, Glyph::Gpu, Glyph::Vram, Glyph::Igpu, Glyph::Disk, Glyph::Net, Glyph::Fps, Glyph::Nvda];
+/// Extra history / snake slot after the rows: ETH upload.
+const UP: usize = ROWS.len();
+const STOCK_UP: u32 = 0x4ade80; // day change >= 0: % text, snake, ribbon line
+const STOCK_GREEN: u32 = 0x76b900; // NVIDIA eye icon
+const STOCK_PRE: u32 = 0xeab308; // pre-market: snake only (RAM yellow)
+/// The stock ribbon scrolls one step per poll while the market trades (stock.rs polls every 10 s).
+const STOCK_SAMPLE_S: f32 = 10.0;
+
+/// Which rows a `Ui` renders: the system column (docked top-left) or the stock
+/// group (its own window, docked above the taskbar).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Group {
+    System,
+    Stock,
+}
 
 fn idx(g: Glyph) -> usize {
     ROWS.iter().position(|&x| x == g).unwrap()
@@ -57,6 +73,7 @@ fn name(g: Glyph) -> &'static str {
         Glyph::Disk => "DISK",
         Glyph::Net => "ETH",
         Glyph::Fps => "FPS",
+        Glyph::Nvda => "NVDA",
     }
 }
 
@@ -177,27 +194,46 @@ struct Values {
     fps_over: bool,
     /// Game monitor refresh rate: the FPS ribbon's full scale.
     fps_hz: u32,
+    /// NVDA pill: "$182.40", "+1.31%", then a gray "today" (market open) or "closed".
+    stock_price: String,
+    stock_chg: String,
+    stock_word: &'static str,
+    /// Day change >= 0: green, else red.
+    stock_up: bool,
+    /// Pre-market quote: snake yellow.
+    stock_pre: bool,
+    /// Prices on the ribbon's 25 / 50 / 75% lines (left price axis).
+    stock_tags: [String; 3],
 }
 
 pub struct Ui {
     s: f32,
     pub track: bool,
-    accent: [u32; 8],
+    group: Group,
+    /// Seconds per ribbon step (1 s metrics; 5 s stock polls).
+    sample_s: f32,
+    /// Last applied quote (stock group): a new seq adds a ribbon point.
+    stock_seq: u64,
+    /// Raw prices behind the stock ribbon (rescaled into `hist` on each new point).
+    stock_hist: VecDeque<f64>,
+    /// Width of the stock ribbon's left price axis (px), set by each static render.
+    stock_gut: f32,
+    accent: [u32; 9],
     text: Text,
     game_mode: bool,
     igpu_shown: bool,
     igpu_zero: u32,
     fps_shown: bool,
     v: Values,
-    hist: [VecDeque<f32>; 9], // ROWS order + net upload at 8
-    snakes: [Snake; 9], // ROWS order + net upload at 8
+    hist: [VecDeque<f32>; 10], // ROWS order + net upload at UP
+    snakes: [Snake; 10], // ROWS order + net upload at UP
     cpu_name: String,
     gpu_name: String,
     igpu_name: String,
     /// DISK snake full length at this transfer speed (MB/s); log2(1 + MB/s) scale.
     disk_max_mbs: f32,
     /// Per row: 0 = collapsed, 1 = fully shown; eases toward `visible` (linear progress).
-    open: [f32; 8],
+    open: [f32; 9],
     icon_boxes: Vec<(usize, BoxF)>,
     /// Everything but the ribbon lines; re-rendered only when dirty.
     stat: Pixmap,
@@ -232,7 +268,7 @@ pub struct Ui {
 }
 
 impl Ui {
-    pub fn new(info: Info, scale: f32, track: bool) -> Self {
+    pub fn new(info: Info, scale: f32, track: bool, group: Group) -> Self {
         let cpu_acc = match info.cpu_vendor {
             Vendor::Intel => 0x60a5fa,
             Vendor::Amd => 0xf97316,
@@ -253,7 +289,12 @@ impl Ui {
         Self {
             s: scale,
             track,
-            accent: [cpu_acc, 0xeab308, gpu_acc, 0xc084fc, igpu_acc, 0x94a3b8, 0x7dd3fc, 0xfacc15],
+            group,
+            sample_s: if group == Group::Stock { STOCK_SAMPLE_S } else { SAMPLE_S },
+            stock_seq: 0,
+            stock_hist: VecDeque::new(),
+            stock_gut: 0.0,
+            accent: [cpu_acc, 0xeab308, gpu_acc, 0xc084fc, igpu_acc, 0x94a3b8, 0x7dd3fc, 0xfacc15, STOCK_GREEN],
             text: Text::new(),
             game_mode: false,
             igpu_shown: false,
@@ -270,7 +311,7 @@ impl Ui {
                 gpu_temp: None,
                 vram: dots.clone(),
                 igpu: dots.clone(),
-                disk: dots,
+                disk: dots.clone(),
                 drives: Vec::new(),
                 net_down: String::new(),
                 net_up: String::new(),
@@ -278,14 +319,25 @@ impl Ui {
                 fps_val: "--".into(),
                 fps_over: false,
                 fps_hz: 0,
+                stock_price: dots,
+                stock_chg: String::new(),
+                stock_word: "",
+                stock_up: true,
+                stock_pre: false,
+                stock_tags: Default::default(),
             },
             hist: Default::default(),
-            snakes: [Snake::default(); 9],
+            snakes: [Snake::default(); 10],
             cpu_name: info.cpu_name.clone(),
             gpu_name: info.gpu_name.clone(),
             igpu_name: info.igpu_name.clone(),
             disk_max_mbs: info.disk_max_mbs,
-            open: [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0], // iGPU and FPS start hidden
+            // System: iGPU and FPS start hidden. Stock: only the NVDA row.
+            open: if group == Group::Stock {
+                [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
+            } else {
+                [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+            },
             icon_boxes: Vec::new(),
             stat: Pixmap::new(1, 1).unwrap(),
             prev: Pixmap::new(1, 1).unwrap(),
@@ -330,11 +382,35 @@ impl Ui {
     }
 
     fn visible(&self, g: Glyph) -> bool {
-        match g {
-            Glyph::Igpu => self.igpu_shown,
-            Glyph::Fps => self.fps_shown,
+        match (self.group, g) {
+            (Group::Stock, g) => g == Glyph::Nvda,
+            (_, Glyph::Nvda) => false,
+            (_, Glyph::Igpu) => self.igpu_shown,
+            (_, Glyph::Fps) => self.fps_shown,
             _ => true,
         }
+    }
+
+    /// A game is detected (fullscreen, borderless or 3D).
+    pub fn game_mode(&self) -> bool {
+        self.game_mode
+    }
+
+    /// Visible top of the first row's pills below the layer's top edge (px).
+    pub fn visible_top(&self) -> i32 {
+        ((self.u(6.0)).round() + self.u(2.0)).round() as i32
+    }
+
+    /// Visible bottom of a one-row layer (the stock group) below its top edge (px):
+    /// the ribbon's bottom, or the pills' when ribbons are off.
+    pub fn visible_bottom(&self) -> i32 {
+        let m = self.u(2.0);
+        let b = if self.track {
+            (self.u(ROW_H) + self.u(1.0)).round() + self.u(TRACK_H).round() - m
+        } else {
+            self.u(6.0).round() + self.u(PILL_H).round() - m
+        };
+        b.round() as i32
     }
 
     /// Row + track height (unscaled).
@@ -350,8 +426,13 @@ impl Ui {
 
     pub fn size(&self) -> (u32, u32) {
         let rows: f32 = (0..ROWS.len()).map(|i| self.shown(i)).sum();
-        let dev = if crate::log::dev() { DEV_H } else { 0.0 };
+        let dev = if self.dev_line() { DEV_H } else { 0.0 };
         (self.u(WIDTH).ceil() as u32, self.u(rows * self.per() + dev).ceil() as u32)
+    }
+
+    /// "developer mode" line under the system rows (dev builds).
+    fn dev_line(&self) -> bool {
+        crate::log::dev() && self.group == Group::System
     }
 
     /// Ribbon lines still scrolling toward the newest sample.
@@ -371,6 +452,10 @@ impl Ui {
 
     // ------------------------------------------------------------------ data
     pub fn apply(&mut self, s: &Snapshot) {
+        if self.group == Group::Stock {
+            self.apply_stock(s);
+            return;
+        }
         let v = &mut self.v;
         v.cpu_main = pct(s.cpu);
         v.cpu_sub = s.cpu_watts.map(|w| format!("{w:.0}W")).unwrap_or_default();
@@ -442,6 +527,7 @@ impl Ui {
             Some((1.0 + s.disk_mbs).log2() / (1.0 + self.disk_max_mbs).log2() * 100.0),
             None,
             Some(s.fps.map(|f| f / hz * 100.0).unwrap_or(0.0)),
+            None, // NVDA: stock group only
         ];
         for (i, t) in targets.iter().enumerate() {
             if let Some(t) = t {
@@ -450,7 +536,7 @@ impl Ui {
         }
         // ETH: download + upload snakes, each up to half the perimeter at NET_MAX_MBS.
         self.snakes[idx(Glyph::Net)].target = (s.net_down / NET_MAX_MBS).clamp(0.0, 1.0) * 0.5;
-        self.snakes[8].target = (s.net_up / NET_MAX_MBS).clamp(0.0, 1.0) * 0.5;
+        self.snakes[UP].target = (s.net_up / NET_MAX_MBS).clamp(0.0, 1.0) * 0.5;
         let mut push = |i: usize, x: Option<f32>| {
             if let Some(x) = x {
                 let h = &mut self.hist[i];
@@ -468,7 +554,7 @@ impl Ui {
         push(4, s.igpu);
         push(5, Some(s.disk_mbs * 0.2)); // 500 MB/s = full scale
         push(6, Some(s.net_down)); // 100 MB/s = full scale
-        push(8, Some(s.net_up));
+        push(UP, Some(s.net_up));
         push(7, s.fps.map(|f| f / hz * 100.0));
         self.phase = 0.0;
         self.fade_next = true;
@@ -489,6 +575,62 @@ impl Ui {
         self.phase = 1.0;
         self.dirty = true;
         self.lines_dirty = true;
+    }
+
+    /// Stock group: re-render only on a new quote (or a game-mode switch), not every metrics tick.
+    fn apply_stock(&mut self, s: &Snapshot) {
+        let game = s.game.is_some();
+        if game != self.game_mode {
+            self.game_mode = game;
+            self.dirty = true;
+        }
+        let Some(q) = &s.stock else { return };
+        if q.seq == self.stock_seq {
+            return;
+        }
+        self.stock_seq = q.seq;
+        let ch = q.change_pct();
+        let v = &mut self.v;
+        v.stock_price = format!("${:.2}", q.price);
+        v.stock_chg = format!("{}{:.2}%", if ch >= 0.0 { '+' } else { '\u{2212}' }, ch.abs());
+        let open = q.session != Session::Closed;
+        v.stock_word = match q.session {
+            Session::Pre => "pre-mkt",
+            Session::Open => "today",
+            Session::Closed => "closed",
+        };
+        v.stock_up = ch >= 0.0;
+        v.stock_pre = q.session == Session::Pre;
+        // One ribbon point per poll while the market trades. Closed: the price stands still, so
+        // only the first quote is kept (doubled, so a flat line shows) and the ribbon stops scrolling.
+        if open || self.stock_hist.is_empty() {
+            if self.stock_hist.is_empty() {
+                self.stock_hist.push_back(q.price);
+            }
+            if self.stock_hist.len() > HIST {
+                self.stock_hist.pop_front();
+            }
+            self.stock_hist.push_back(q.price);
+            self.phase = if open { 0.0 } else { 1.0 };
+        }
+        self.rescale_stock();
+        // Snake length = the day change itself: +31% -> 31% of the ring (green), -32% -> 32% (red).
+        self.snakes[idx(Glyph::Nvda)].target = (ch.abs() as f32 / 100.0).clamp(0.0, 1.0);
+        self.fade_next = true;
+        self.dirty = true;
+    }
+
+    /// Map the raw prices onto the ribbon's 0..100 scale: the window's low..high with 20%
+    /// padding (at least 0.2% of the price, so cent-level noise stays flat), and label the grid lines.
+    fn rescale_stock(&mut self) {
+        let (lo0, hi0) = self.stock_hist.iter().fold((f64::MAX, f64::MIN), |(a, b), &p| (a.min(p), b.max(p)));
+        let last = self.stock_hist.back().copied().unwrap_or(0.0);
+        let span = (hi0 - lo0).max(last * 0.002).max(0.01) * 1.2;
+        let lo = (hi0 + lo0) / 2.0 - span / 2.0;
+        let h = &mut self.hist[idx(Glyph::Nvda)];
+        h.clear();
+        h.extend(self.stock_hist.iter().map(|&p| ((p - lo) / span * 100.0) as f32));
+        self.v.stock_tags = [25.0, 50.0, 75.0].map(|p| format!("{:.2}", lo + span * p / 100.0));
     }
 
     // ------------------------------------------------------------- rendering
@@ -538,7 +680,7 @@ impl Ui {
             }
             y += self.u(self.per()) * k;
         }
-        if crate::log::dev() {
+        if self.dev_line() {
             let (fm, t) = (self.font_num(), "developer mode");
             let w = self.text.measure(fm, t) as f32 + self.u(16.0);
             let b = BoxF { x: ((self.u(WIDTH) - w) / 2.0).round(), y: y.round(), w: w.round(), h: self.u(DEV_H).round() };
@@ -620,7 +762,15 @@ impl Ui {
         }
         let ty = y + self.u(ROW_H);
         let tb = BoxF { x: 0.0, y: (ty + self.u(1.0)).round(), w: self.u(WIDTH).round(), h: self.u(TRACK_H).round() };
-        self.render_track(pix, tb);
+        if g == Glyph::Nvda {
+            // Left price axis: as wide as the widest tag plus margins.
+            let fnum = self.font_num();
+            let tags = self.v.stock_tags.clone();
+            let w = tags.iter().map(|t| self.text.measure(fnum, t)).max().unwrap_or(0) as f32;
+            self.stock_gut = if w > 0.0 { (w + self.u(10.0)).round() } else { 0.0 };
+        }
+        let gut = self.gutter(g);
+        self.render_track(pix, tb, gut);
         self.track_captions(pix, g, tb);
         if lines {
             let mut clip = tiny_skia::Mask::new(pix.width(), pix.height());
@@ -630,6 +780,33 @@ impl Ui {
             self.track_lines(pix, g, tb, clip.as_ref());
         }
         Some(tb)
+    }
+
+    /// Ribbon space kept free on the left for a price axis (stock row only).
+    fn gutter(&self, g: Glyph) -> f32 {
+        if g == Glyph::Nvda {
+            self.stock_gut
+        } else {
+            0.0
+        }
+    }
+
+    /// Day-change color of the stock row (green up, red down).
+    fn stock_color(&self) -> u32 {
+        if self.v.stock_up {
+            STOCK_UP
+        } else {
+            RED
+        }
+    }
+
+    /// Line / snake color of row `i`.
+    fn row_color(&self, i: usize) -> u32 {
+        if ROWS[i] == Glyph::Nvda {
+            self.stock_color()
+        } else {
+            self.accent[i]
+        }
     }
 
     fn bg(&self) -> f32 {
@@ -708,6 +885,20 @@ impl Ui {
                 self.gauge_slot(pix, vb, 1);
             }
             Glyph::Net => self.eth(pix, vb),
+            Glyph::Nvda => {
+                // "$182.40 +1.31% today": price, colored day change, gray reference word.
+                let (p, c, w) = (self.v.stock_price.clone(), self.v.stock_chg.clone(), self.v.stock_word);
+                self.label(pix, fm, &p, tx, ty, TXT, Anchor::West);
+                if !c.is_empty() {
+                    let x2 = tx + self.text.measure(fm, &format!("{p} ")) as f32;
+                    let col = self.stock_color();
+                    self.label(pix, fm, &c, x2, ty, col, Anchor::West);
+                    // The reference word in the smaller ribbon-caption size, so long changes still fit.
+                    let x3 = x2 + self.text.measure(fm, &format!("{c} ")) as f32;
+                    let fnum = self.font_num();
+                    self.label(pix, fnum, w, x3, ty, MUTED, Anchor::West);
+                }
+            }
             Glyph::Fps => {
                 let t = self.v.fps_val.clone();
                 let c = if self.v.fps_over { WATT } else { TXT };
@@ -967,12 +1158,12 @@ impl Ui {
         self.label(pix, fm, "MB/s", b.x + (118.0 * s).floor(), ty, MUTED, Anchor::West);
     }
 
-    /// 60s history ribbon.
-    fn render_track(&mut self, pix: &mut PixmapMut, b: BoxF) {
+    /// 60s history ribbon; `gut`: left space kept free of grid lines (price axis).
+    fn render_track(&mut self, pix: &mut PixmapMut, b: BoxF, gut: f32) {
         let m = self.u(2.0);
         draw::fill_rrect(pix, b.x + m, b.y + m, b.w - 2.0 * m, b.h - 2.0 * m, self.u(PILL_H / 2.0), col_a(PILL, self.bg()));
         let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
-        let (x0, x1) = (b.x + self.u(6.0), b.x + b.w - self.u(6.0));
+        let (x0, x1) = (b.x + self.u(6.0) + gut, b.x + b.w - self.u(6.0));
         let grid = col_a(GRID, self.bg());
         let lw = self.s.round().max(1.0);
         self.contour(pix, b.x + m, b.y + m, b.w - 2.0 * m, b.h - 2.0 * m, self.u(PILL_H / 2.0));
@@ -997,6 +1188,17 @@ impl Ui {
             _ => String::new(),
         };
         self.label(pix, fnum, &name, lx0 + self.u(4.0), ty, TRACK_LBL, Anchor::West);
+        if g == Glyph::Nvda {
+            // Price axis: each tag's digits centered on its grid line (drawn 1 line-width tall at gy.round()).
+            let lw = self.s.round().max(1.0);
+            let (pad, x) = (self.u(5.0), b.x + self.u(9.0));
+            let inner = b.h - 2.0 * pad;
+            let tags = self.v.stock_tags.clone();
+            for (t, p) in tags.iter().zip([25.0f32, 50.0, 75.0]) {
+                let gy = b.y + b.h - pad - p / 100.0 * inner;
+                self.label(pix, fnum, t, x, gy.round() + lw / 2.0, TRACK_LBL, Anchor::West);
+            }
+        }
         if g == Glyph::Fps && self.v.fps_hz > 0 {
             let t = format!("{} Hz", self.v.fps_hz);
             let w = self.text.measure(fnum, &t) as f32;
@@ -1010,7 +1212,7 @@ impl Ui {
     fn track_lines(&self, pix: &mut PixmapMut, g: Glyph, b: BoxF, clip: Option<&tiny_skia::Mask>) {
         // Lines span the ribbon edge to edge.
         let m = self.u(2.0);
-        let (x0, x1) = (b.x + m, b.x + b.w - m);
+        let (x0, x1) = (b.x + m + self.gutter(g), b.x + b.w - m);
         let gy = |p: f32| b.y + b.h - self.u(5.0) - p / 100.0 * (b.h - self.u(10.0));
         let (step, ph) = ((x1 - x0) / (HIST as f32 - 1.0), self.phase);
         let line = |pix: &mut PixmapMut, vals: &VecDeque<f32>, c: u32, hatch: bool| {
@@ -1081,9 +1283,9 @@ impl Ui {
             }
         };
         let i = idx(g);
-        line(pix, &self.hist[i], self.accent[i], true);
+        line(pix, &self.hist[i], self.row_color(i), true);
         if g == Glyph::Net {
-            line(pix, &self.hist[8], NET_UP, false); // same gaps as download: hatch once
+            line(pix, &self.hist[UP], NET_UP, false); // same gaps as download: hatch once
         }
     }
 
@@ -1120,7 +1322,7 @@ impl Ui {
         // One 30 fps clock for every per-frame layer change (ribbon scroll, easing rings).
         let scrolling = self.phase < 1.0;
         if scrolling {
-            self.phase = (self.phase + dt / SAMPLE_S).min(1.0);
+            self.phase = (self.phase + dt / self.sample_s).min(1.0);
         }
         if scrolling || gauges {
             self.line_acc += dt;
@@ -1153,7 +1355,7 @@ impl Ui {
         };
         self.lines_moving()
             || self.rows_moving()
-            || self.icon_boxes.iter().any(|&(i, _)| moving(self.snakes[i]) || (ROWS[i] == Glyph::Net && moving(self.snakes[8])))
+            || self.icon_boxes.iter().any(|&(i, _)| moving(self.snakes[i]) || (ROWS[i] == Glyph::Net && moving(self.snakes[UP])))
     }
 
     /// Static layer (capsules, text, gauges, ribbons), re-rendered only when dirty.
@@ -1198,9 +1400,12 @@ impl Ui {
         if ROWS[i] == Glyph::Net {
             // Download and upload run on opposite sides of the capsule.
             self.snake_seg(pix, self.snakes[i], 0.0, self.accent[i], b);
-            self.snake_seg(pix, self.snakes[8], 0.5, NET_UP, b);
+            self.snake_seg(pix, self.snakes[UP], 0.5, NET_UP, b);
+        } else if ROWS[i] == Glyph::Nvda && self.v.stock_pre {
+            // Pre-market: only the snake turns yellow; the ribbon keeps green / red.
+            self.snake_seg(pix, self.snakes[i], 0.0, STOCK_PRE, b);
         } else {
-            self.snake_seg(pix, self.snakes[i], 0.0, self.accent[i], b);
+            self.snake_seg(pix, self.snakes[i], 0.0, self.row_color(i), b);
         }
     }
 

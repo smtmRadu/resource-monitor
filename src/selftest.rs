@@ -12,7 +12,8 @@ use windows::Win32::Foundation::{FILETIME, HWND};
 use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
 use crate::metrics::{self, Gpu, Snapshot};
-use crate::ui::{Ui, FLAME_FPS};
+use crate::stock::{Quote, Session};
+use crate::ui::{Group, Ui, FLAME_FPS};
 
 fn save(ui: &mut Ui, dir: &Path, name: &str, report: &mut String) {
     let t = Instant::now();
@@ -66,6 +67,7 @@ fn synth(game: bool) -> Snapshot {
         ],
         net_down: 12.3,
         net_up: 1.4,
+        stock: None,
     }
 }
 
@@ -74,7 +76,26 @@ pub fn run(dir: &str) {
     let _ = std::fs::create_dir_all(dir);
     let mut report = String::new();
     let info = metrics::info();
-    let mut ui = Ui::new(info, 1.0, true);
+    let mut ui = Ui::new(info.clone(), 1.0, true, Group::System);
+
+    // Stock group: 60 synthetic polls (random walk), market open (up) and closed (down).
+    let mut st = Ui::new(info, 1.0, true, Group::Stock);
+    let mut price = 180.0f64;
+    for seq in 1..=61u64 {
+        price += ((seq * 7919 % 13) as f64 - 5.5) * 0.03;
+        st.apply(&Snapshot { stock: Some(Quote { price, prev_close: 178.0, session: Session::Open, seq }), ..synth(false) });
+    }
+    st.step(0.6);
+    save(&mut st, dir, "stock_up", &mut report);
+    st.apply(&Snapshot { stock: Some(Quote { price, prev_close: 176.0, session: Session::Pre, seq: 98 }), ..synth(false) });
+    st.base();
+    st.step(0.6);
+    save(&mut st, dir, "stock_pre", &mut report);
+    st.apply(&Snapshot { stock: Some(Quote { price, prev_close: 186.0, session: Session::Closed, seq: 99 }), ..synth(true) });
+    st.base(); // starts the values crossfade
+    st.step(0.6); // ... and runs it to the end
+    save(&mut st, dir, "stock_down_closed_game", &mut report);
+    let _ = writeln!(report, "stock visible top/bottom {}/{}", st.visible_top(), st.visible_bottom());
 
     // Live metrics through the real sampler (no window to notify).
     metrics::start(HWND(std::ptr::null_mut()), 0);

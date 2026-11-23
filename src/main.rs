@@ -10,6 +10,7 @@ mod log;
 mod metrics;
 mod selftest;
 mod settings;
+mod stock;
 mod text;
 mod tray;
 mod ui;

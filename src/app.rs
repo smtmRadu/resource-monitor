@@ -14,6 +14,11 @@
 //! Exclusive mode registers the main window as an AppBar on the display's left
 //! edge (like the taskbar): Windows shrinks the work area, so maximized and
 //! snapped windows start right of the monitor's strip.
+//!
+//! The NVDA stock row is a second pair of layers (pills + snakes), docked to
+//! the bottom of the display's work area (right above the taskbar): its ribbon
+//! ends as far above the taskbar as the CPU pill starts below the screen top.
+//! A fullscreen game covers the taskbar, so then it docks to the screen bottom.
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::OnceLock;
@@ -34,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use crate::log::log;
 use crate::settings::Settings;
 use crate::tray;
-use crate::ui::Ui;
+use crate::ui::{Group, Ui};
 
 const WM_APP_DATA: u32 = WM_APP + 1;
 const WM_APP_TRAY: u32 = WM_APP + 2;
@@ -121,6 +126,13 @@ struct App {
     main: Layer,
     snakes: Layer,
     ui: Ui,
+    /// NVDA stock group: its own pills + snakes layers, docked above the taskbar.
+    stock_main: Layer,
+    stock_snakes: Layer,
+    stock_ui: Ui,
+    stock_origin: POINT,
+    /// Kept to rebuild the stock group fresh when Stocks > NVDA is turned on.
+    info: crate::metrics::Info,
     settings: Settings,
     dpi: u32,
     /// Chosen display's full rect.
@@ -222,17 +234,30 @@ pub fn run() {
             log("CreateWindowExW failed");
             return;
         };
+        // Stock group windows: plain layers like the snake overlay (all messages go to the main window).
+        let (Some(stock_hwnd), Some(stock_snake_hwnd)) = (popup(snake_class, w!(""), hinst), popup(snake_class, w!(""), hinst)) else {
+            log("CreateWindowExW failed (stock)");
+            return;
+        };
         let settings = Settings::load(monitors().len());
         let (monitor, dpi, displays) = placement(settings.display);
         let info = crate::metrics::info();
         log(&format!("disk max {:.0} MB/s", info.disk_max_mbs));
-        let ui = Ui::new(info, settings.scale * dpi as f32 / 96.0, settings.track);
+        let scale = settings.scale * dpi as f32 / 96.0;
+        let stock_ui = Ui::new(info.clone(), scale, settings.track, Group::Stock);
+        let ui = Ui::new(info.clone(), scale, settings.track, Group::System);
+        crate::stock::set_enabled(settings.nvda);
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
                 main: Layer::new(hwnd),
                 snakes: Layer::new(snake_hwnd),
                 ui,
+                stock_main: Layer::new(stock_hwnd),
+                stock_snakes: Layer::new(stock_snake_hwnd),
+                stock_ui,
+                stock_origin: POINT::default(),
+                info,
                 settings,
                 dpi,
                 monitor,
@@ -263,9 +288,12 @@ pub fn run() {
             a.place(); // origin, and the strip in Exclusive mode
             a.present();
         });
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-        let _ = ShowWindow(snake_hwnd, SW_SHOWNOACTIVATE);
+        for h in [hwnd, snake_hwnd] {
+            let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+        }
+        with_app(|a| a.show_stock());
         SetTimer(Some(hwnd), TIMER_TOPMOST, 2000, None);
+        crate::stock::start();
         crate::metrics::start(hwnd, WM_APP_DATA);
 
         let mut msg = MSG::default();
@@ -274,6 +302,7 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
         crate::metrics::stop();
+        crate::stock::stop();
         tray::remove(hwnd);
         log("quit");
     }
@@ -293,12 +322,28 @@ impl App {
         if dpi != self.dpi {
             self.dpi = dpi;
             self.ui.set_scale(self.scale());
+            self.stock_ui.set_scale(self.scale());
         }
         self.sync_bar();
         let off = (10 * self.dpi / 96) as i32;
         let r = self.bar.unwrap_or(self.monitor);
         self.origin = POINT { x: r.left + off, y: r.top + off };
+        self.place_stock();
         self.ui.invalidate();
+        self.stock_ui.invalidate();
+    }
+
+    /// Dock the stock group to the bottom of the work area (the screen bottom while a
+    /// fullscreen game covers the taskbar), with the same visible gap as the system
+    /// column's top: its ribbon ends `off + pill inset` above the taskbar. True if it moved.
+    fn place_stock(&mut self) -> bool {
+        let off = (10 * self.dpi / 96) as i32;
+        let floor = if self.stock_ui.game_mode() && foreground_covers(self.monitor) { self.monitor.bottom } else { work_area(self.monitor).bottom };
+        let gap = off + self.ui.visible_top();
+        let at = POINT { x: self.origin.x, y: floor - gap - self.stock_ui.visible_bottom() };
+        let moved = at != self.stock_origin;
+        self.stock_origin = at;
+        moved
     }
 
     /// Exclusive and visible: reserve a strip as wide as the monitor plus its
@@ -340,29 +385,37 @@ impl App {
         }
     }
 
-    /// Push both layers (after data, layout or settings changes).
+    /// Push all layers (after data, layout or settings changes).
     fn present(&mut self) {
         if !self.visible {
             return;
         }
         let at = self.origin;
         self.main.push(self.ui.base(), at);
+        if self.settings.nvda {
+            let sa = self.stock_origin;
+            self.stock_main.push(self.stock_ui.base(), sa);
+        }
         self.present_snakes();
     }
 
-    /// Push only the snake overlay (every animation frame).
+    /// Push only the snake overlays (every animation frame).
     fn present_snakes(&mut self) {
         if !self.visible {
             return;
         }
         let at = self.origin;
         self.snakes.push(self.ui.overlay(), at);
+        if self.settings.nvda {
+            let sa = self.stock_origin;
+            self.stock_snakes.push(self.stock_ui.overlay(), sa);
+        }
         self.sync_anim();
     }
 
     /// Run frame pacing only while a snake is actually moving.
     fn sync_anim(&mut self) {
-        let want = self.visible && self.ui.animating();
+        let want = self.visible && (self.ui.animating() || (self.settings.nvda && self.stock_ui.animating()));
         if want != self.anim_on {
             if want {
                 self.last_frame = Instant::now();
@@ -396,17 +449,28 @@ impl App {
         self.last_frame = now;
         let moving = self.ui.rows_moving();
         self.ui.step(dt);
-        // Rows collapse / expand (size changes) or a 30 fps ribbon frame: push the base layer.
-        if moving || self.ui.lines_due() {
-            self.present();
-        } else {
-            self.present_snakes();
+        if self.settings.nvda {
+            self.stock_ui.step(dt);
         }
+        if !self.visible {
+            return;
+        }
+        // Rows collapse / expand (size changes) or a 30 fps ribbon frame: push that group's base layer.
+        if moving || self.ui.lines_due() {
+            let at = self.origin;
+            self.main.push(self.ui.base(), at);
+        }
+        if self.settings.nvda && self.stock_ui.lines_due() {
+            let sa = self.stock_origin;
+            self.stock_main.push(self.stock_ui.base(), sa);
+        }
+        self.present_snakes();
     }
 
     fn set_visible(&mut self, v: bool) {
         self.visible = v;
         crate::metrics::set_paused(!v);
+        crate::stock::set_enabled(self.settings.nvda && v); // hidden: no stock requests either
         if !v {
             self.hidden_at = Some(Instant::now());
         } else if let Some(t) = self.hidden_at.take() {
@@ -419,16 +483,28 @@ impl App {
             self.present();
         }
         unsafe {
-            let _ = ShowWindow(self.main.hwnd, cmd);
-            let _ = ShowWindow(self.snakes.hwnd, cmd);
+            for h in [self.main.hwnd, self.snakes.hwnd] {
+                let _ = ShowWindow(h, cmd);
+            }
         }
+        self.show_stock();
         self.sync_anim();
     }
 
-    /// Keep both on top (other topmost windows can bury us), overlay above main.
+    /// Stock windows follow Show / Hide and Stocks > NVDA.
+    fn show_stock(&self) {
+        let cmd = if self.visible && self.settings.nvda { SW_SHOWNOACTIVATE } else { SW_HIDE };
+        unsafe {
+            for h in [self.stock_main.hwnd, self.stock_snakes.hwnd] {
+                let _ = ShowWindow(h, cmd);
+            }
+        }
+    }
+
+    /// Keep all layers on top (other topmost windows can bury us), each overlay above its pills.
     fn raise(&self) {
         unsafe {
-            for h in [self.main.hwnd, self.snakes.hwnd] {
+            for h in [self.main.hwnd, self.snakes.hwnd, self.stock_main.hwnd, self.stock_snakes.hwnd] {
                 let _ = SetWindowPos(h, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
                 let ex = GetWindowLongW(h, GWL_EXSTYLE);
                 if ex & WS_EX_TRANSPARENT.0 as i32 == 0 {
@@ -444,7 +520,19 @@ impl App {
             tray::ID_TRACK => {
                 self.settings.track = !self.settings.track;
                 self.ui.track = self.settings.track;
-                self.ui.invalidate();
+                self.stock_ui.track = self.settings.track;
+                self.place(); // the stock group's visible bottom moves with its ribbon
+            }
+            tray::ID_NVDA => {
+                self.settings.nvda = !self.settings.nvda;
+                crate::stock::set_enabled(self.settings.nvda);
+                if self.settings.nvda {
+                    // Fresh group: no stale ribbon from the last time it was on.
+                    self.stock_ui = Ui::new(self.info.clone(), self.scale(), self.settings.track, Group::Stock);
+                    self.place();
+                }
+                self.show_stock();
+                log(if self.settings.nvda { "stocks: NVDA on" } else { "stocks: NVDA off" });
             }
             tray::ID_SIZE_075 | tray::ID_SIZE_1 | tray::ID_SIZE_125 => {
                 self.settings.scale = match id {
@@ -453,6 +541,7 @@ impl App {
                     _ => 1.25,
                 };
                 self.ui.set_scale(self.scale());
+                self.stock_ui.set_scale(self.scale());
                 self.place(); // the Exclusive strip follows the width
                 log(&format!("scale {}x", self.settings.scale));
             }
@@ -471,6 +560,8 @@ impl App {
                 return;
             }
             tray::ID_QUIT => unsafe {
+                let _ = DestroyWindow(self.stock_snakes.hwnd);
+                let _ = DestroyWindow(self.stock_main.hwnd);
                 let _ = DestroyWindow(self.snakes.hwnd);
                 let _ = DestroyWindow(self.main.hwnd);
                 return;
@@ -492,6 +583,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if let Some(s) = crate::metrics::take_latest() {
                 with_app(|a| {
                     a.ui.apply(&s);
+                    if a.settings.nvda {
+                        a.stock_ui.apply(&s);
+                    }
+                    a.place_stock(); // a fullscreen game starting / ending moves it
                     a.present();
                 });
             }
@@ -547,6 +642,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     display: if a.settings.display < a.displays { a.settings.display } else { 0 },
                     displays: a.displays,
                     exclusive: a.settings.exclusive,
+                    nvda: a.settings.nvda,
                 });
                 if let Some(st) = st {
                     let id = tray::menu(hwnd, &st);
@@ -571,7 +667,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             }
             DefWindowProcW(hwnd, msg, wp, lp)
         }
-        WM_DPICHANGED | WM_DISPLAYCHANGE => {
+        WM_DPICHANGED | WM_DISPLAYCHANGE | WM_SETTINGCHANGE => {
+            // WM_SETTINGCHANGE: the work area changed (taskbar resized, moved or auto-hide toggled).
             with_app(|a| {
                 a.place();
                 a.present();
@@ -631,6 +728,28 @@ fn monitors() -> Vec<(RECT, u32, bool)> {
     }
     v.sort_by_key(|(r, _, primary)| (!primary, r.left, r.top));
     v
+}
+
+/// Work area (the display minus the taskbar and AppBars) of the display at `r`.
+fn work_area(r: RECT) -> RECT {
+    unsafe {
+        let h = MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+        if GetMonitorInfoW(h, &mut mi).as_bool() {
+            mi.rcWork
+        } else {
+            r
+        }
+    }
+}
+
+/// The foreground window covers the whole display `r` (a fullscreen / borderless game hides the taskbar).
+fn foreground_covers(r: RECT) -> bool {
+    unsafe {
+        let fg = GetForegroundWindow();
+        let mut w = RECT::default();
+        !fg.is_invalid() && GetWindowRect(fg, &mut w).is_ok() && w.left <= r.left && w.top <= r.top && w.right >= r.right && w.bottom >= r.bottom
+    }
 }
 
 /// Rect + DPI of display `index` (falls back to primary when it is gone), and the display count.
