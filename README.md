@@ -57,7 +57,7 @@ or when a known game exe runs. A detected game stays the game while unfocused,
 until it exits. In **game mode** the pill backgrounds fade to 25% and text gets
 a dark halo, so the overlay stays readable without hiding the game.
 
-**Stocks (optional, off by default):** tray **Stocks → NVDA** adds an NVDA row
+**Stocks (optional, off by default):** tray **Stocks** adds an NVDA row
 docked at the bottom of the display, right above the taskbar (the screen bottom
 while a fullscreen game hides the taskbar). Its pill shows the price, the day
 change and `today` / `pre-mkt` / `closed`. The snake length is the day change
@@ -82,7 +82,7 @@ The window is click-through, so everything lives in the **tray icon**
   start right of it)
 - **Size** – 0.75x / 1x (default) / 1.25x
 - **Display** – which monitor it docks on (only with 2+ displays)
-- **Stocks** – **NVDA** row on/off (off by default; it polls the internet)
+- **Stocks** – stock rows (NVDA) on/off, all together (off by default; it polls the internet)
 - **Quit**
 
 Choices persist in `%LOCALAPPDATA%\ResourceMonitor\settings.json` (dev builds:
@@ -181,7 +181,7 @@ How it stays light:
   paced by `DwmFlush`. Pacing stops when nothing moves or the monitor is hidden.
 - Adapter discovery uses D3DKMT instead of DXGI, which would wake a sleeping
   NVIDIA GPU on hybrid laptops (2 W → 17 W).
-- **Stocks → NVDA** on (v0.3.8, 2 × 75 s, market open): +0.8 points of one core
+- **Stocks** on (v0.3.8, 2 × 75 s, market open): +0.8 points of one core
   (mostly its 30 fps ribbon scroll), +2 MB private, +1 thread, ~11 MB of data per
   trading day (~2.5 KB every 10 s). Off: no requests, nothing drawn.
 - The update check is one ~13 KB request per hour. Installed files are hashed

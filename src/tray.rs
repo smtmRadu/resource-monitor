@@ -25,7 +25,7 @@ pub const ID_SIZE_075: u32 = 10;
 pub const ID_SIZE_1: u32 = 11;
 pub const ID_SIZE_125: u32 = 12;
 pub const ID_DISPLAY: u32 = 20; // + index
-pub const ID_NVDA: u32 = 40; // Stocks group (more tickers: 41, 42, ...)
+pub const ID_STOCKS: u32 = 40;
 pub const ID_QUIT: u32 = 99;
 
 pub struct MenuState {
@@ -35,7 +35,7 @@ pub struct MenuState {
     pub display: usize,
     pub displays: usize,
     pub exclusive: bool,
-    pub nvda: bool,
+    pub stocks: bool,
 }
 
 /// CPU chip fused with the FPS sweep (line-icon style, like the pills).
@@ -204,11 +204,7 @@ pub fn menu(hwnd: HWND, st: &MenuState) -> u32 {
                 let _ = AppendMenuW(m, MF_POPUP, disp.0 as usize, PCWSTR(w.as_ptr()));
             }
         }
-        if let Ok(stocks) = CreatePopupMenu() {
-            item(stocks, ID_NVDA, "NVDA", st.nvda);
-            let w = wide("Stocks");
-            let _ = AppendMenuW(m, MF_POPUP, stocks.0 as usize, PCWSTR(w.as_ptr()));
-        }
+        item(m, ID_STOCKS, "Stocks", st.stocks);
         let _ = AppendMenuW(m, MF_SEPARATOR, 0, PCWSTR::null());
         item(m, ID_QUIT, "Quit", false);
         let mut pt = POINT::default();

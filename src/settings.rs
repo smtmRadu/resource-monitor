@@ -10,13 +10,13 @@ pub struct Settings {
     /// Mode: false = Overlayed (floats over windows), true = Exclusive (reserves
     /// a strip on the display's left edge; the usable area starts to its right).
     pub exclusive: bool,
-    /// Stocks > NVDA: the bottom-docked stock group and its poller (off by default: it uses the network).
-    pub nvda: bool,
+    /// Stocks: the bottom-docked stock group and its poller, all on or all off (off by default: it uses the network).
+    pub stocks: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { scale: 1.0, track: true, display: 0, exclusive: false, nvda: false }
+        Self { scale: 1.0, track: true, display: 0, exclusive: false, stocks: false }
     }
 }
 
@@ -51,14 +51,14 @@ impl Settings {
         if let Some(x) = v.get("exclusive").and_then(Value::as_bool) {
             s.exclusive = x;
         }
-        if let Some(x) = v.get("nvda").and_then(Value::as_bool) {
-            s.nvda = x;
+        if let Some(x) = v.get("stocks").and_then(Value::as_bool) {
+            s.stocks = x;
         }
         s
     }
 
     pub fn save(&self) {
-        let v = json!({ "scale": self.scale, "track": self.track, "display": self.display, "exclusive": self.exclusive, "nvda": self.nvda });
+        let v = json!({ "scale": self.scale, "track": self.track, "display": self.display, "exclusive": self.exclusive, "stocks": self.stocks });
         let _ = std::fs::write(crate::log::data_dir().join("settings.json"), v.to_string());
     }
 }

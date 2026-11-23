@@ -131,7 +131,7 @@ struct App {
     stock_snakes: Layer,
     stock_ui: Ui,
     stock_origin: POINT,
-    /// Kept to rebuild the stock group fresh when Stocks > NVDA is turned on.
+    /// Kept to rebuild the stock group fresh when Stocks is turned on.
     info: crate::metrics::Info,
     settings: Settings,
     dpi: u32,
@@ -246,7 +246,7 @@ pub fn run() {
         let scale = settings.scale * dpi as f32 / 96.0;
         let stock_ui = Ui::new(info.clone(), scale, settings.track, Group::Stock);
         let ui = Ui::new(info.clone(), scale, settings.track, Group::System);
-        crate::stock::set_enabled(settings.nvda);
+        crate::stock::set_enabled(settings.stocks);
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         APP.with(|a| {
             *a.borrow_mut() = Some(App {
@@ -392,7 +392,7 @@ impl App {
         }
         let at = self.origin;
         self.main.push(self.ui.base(), at);
-        if self.settings.nvda {
+        if self.settings.stocks {
             let sa = self.stock_origin;
             self.stock_main.push(self.stock_ui.base(), sa);
         }
@@ -406,7 +406,7 @@ impl App {
         }
         let at = self.origin;
         self.snakes.push(self.ui.overlay(), at);
-        if self.settings.nvda {
+        if self.settings.stocks {
             let sa = self.stock_origin;
             self.stock_snakes.push(self.stock_ui.overlay(), sa);
         }
@@ -415,7 +415,7 @@ impl App {
 
     /// Run frame pacing only while a snake is actually moving.
     fn sync_anim(&mut self) {
-        let want = self.visible && (self.ui.animating() || (self.settings.nvda && self.stock_ui.animating()));
+        let want = self.visible && (self.ui.animating() || (self.settings.stocks && self.stock_ui.animating()));
         if want != self.anim_on {
             if want {
                 self.last_frame = Instant::now();
@@ -449,7 +449,7 @@ impl App {
         self.last_frame = now;
         let moving = self.ui.rows_moving();
         self.ui.step(dt);
-        if self.settings.nvda {
+        if self.settings.stocks {
             self.stock_ui.step(dt);
         }
         if !self.visible {
@@ -460,7 +460,7 @@ impl App {
             let at = self.origin;
             self.main.push(self.ui.base(), at);
         }
-        if self.settings.nvda && self.stock_ui.lines_due() {
+        if self.settings.stocks && self.stock_ui.lines_due() {
             let sa = self.stock_origin;
             self.stock_main.push(self.stock_ui.base(), sa);
         }
@@ -470,7 +470,7 @@ impl App {
     fn set_visible(&mut self, v: bool) {
         self.visible = v;
         crate::metrics::set_paused(!v);
-        crate::stock::set_enabled(self.settings.nvda && v); // hidden: no stock requests either
+        crate::stock::set_enabled(self.settings.stocks && v); // hidden: no stock requests either
         if !v {
             self.hidden_at = Some(Instant::now());
         } else if let Some(t) = self.hidden_at.take() {
@@ -491,9 +491,9 @@ impl App {
         self.sync_anim();
     }
 
-    /// Stock windows follow Show / Hide and Stocks > NVDA.
+    /// Stock windows follow Show / Hide and Stocks.
     fn show_stock(&self) {
-        let cmd = if self.visible && self.settings.nvda { SW_SHOWNOACTIVATE } else { SW_HIDE };
+        let cmd = if self.visible && self.settings.stocks { SW_SHOWNOACTIVATE } else { SW_HIDE };
         unsafe {
             for h in [self.stock_main.hwnd, self.stock_snakes.hwnd] {
                 let _ = ShowWindow(h, cmd);
@@ -523,16 +523,16 @@ impl App {
                 self.stock_ui.track = self.settings.track;
                 self.place(); // the stock group's visible bottom moves with its ribbon
             }
-            tray::ID_NVDA => {
-                self.settings.nvda = !self.settings.nvda;
-                crate::stock::set_enabled(self.settings.nvda);
-                if self.settings.nvda {
+            tray::ID_STOCKS => {
+                self.settings.stocks = !self.settings.stocks;
+                crate::stock::set_enabled(self.settings.stocks);
+                if self.settings.stocks {
                     // Fresh group: no stale ribbon from the last time it was on.
                     self.stock_ui = Ui::new(self.info.clone(), self.scale(), self.settings.track, Group::Stock);
                     self.place();
                 }
                 self.show_stock();
-                log(if self.settings.nvda { "stocks: NVDA on" } else { "stocks: NVDA off" });
+                log(if self.settings.stocks { "stocks on" } else { "stocks off" });
             }
             tray::ID_SIZE_075 | tray::ID_SIZE_1 | tray::ID_SIZE_125 => {
                 self.settings.scale = match id {
@@ -583,7 +583,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             if let Some(s) = crate::metrics::take_latest() {
                 with_app(|a| {
                     a.ui.apply(&s);
-                    if a.settings.nvda {
+                    if a.settings.stocks {
                         a.stock_ui.apply(&s);
                     }
                     a.place_stock(); // a fullscreen game starting / ending moves it
@@ -642,7 +642,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                     display: if a.settings.display < a.displays { a.settings.display } else { 0 },
                     displays: a.displays,
                     exclusive: a.settings.exclusive,
-                    nvda: a.settings.nvda,
+                    stocks: a.settings.stocks,
                 });
                 if let Some(st) = st {
                     let id = tray::menu(hwnd, &st);

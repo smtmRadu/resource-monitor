@@ -2,7 +2,7 @@
 //!
 //! Every 10 s while the US market trades (pre-market + regular session), every
 //! 5 min otherwise; a failed request retries after 30 s and keeps the last quote.
-//! Off (tray Stocks > NVDA unchecked, the default) the thread idles: no requests.
+//! Off (tray Stocks unchecked, the default) the thread idles: no requests.
 //! One request asks for the last 2 min of 1-minute bars (~1.5 KB + headers), so
 //! 10 s polling over the 12 h of pre-market + session costs ~10 MB per trading day. The sampler copies the latest quote into each
 //! snapshot, so a slow request never stalls the 1 Hz metrics.
