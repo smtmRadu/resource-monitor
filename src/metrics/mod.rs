@@ -60,8 +60,8 @@ pub struct Snapshot {
     pub drives: Vec<Drive>,
     pub net_down: f32,
     pub net_up: f32,
-    /// Latest NVDA quote (stock poller thread); None until the first reply.
-    pub stock: Option<crate::stock::Quote>,
+    /// Latest quotes, `stock::SYMBOLS` order (stock poller thread); None until the first reply.
+    pub stock: crate::stock::Quotes,
 }
 
 /// Static facts the UI needs before the first sample (icon colors, core grid).

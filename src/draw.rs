@@ -112,6 +112,8 @@ pub enum Glyph {
     Fps,
     /// NVDA stock row (its own window, docked above the taskbar).
     Nvda,
+    /// ANT stock row (its own window, right of the NVDA one).
+    Ant,
 }
 
 /// NVIDIA's eye mark: the real logo outline (Wikimedia Commons "NVIDIA logo.svg", path21),
@@ -296,6 +298,13 @@ pub fn icon(pix: &mut PixmapMut, g: Glyph, tx: f32, ty: f32, s: f32, c: Color) {
                     p.pix.stroke_path(&path, &paint(p.c), &stroke(0.7 * s, LineCap::Butt), Transform::identity(), None);
                 }
             }
+        }
+        Glyph::Ant => {
+            // Anthropic's A-backslash mark: an A (legs + crossbar) and a parallel backslash, 17x14 grid px.
+            let w = 1.6;
+            p.stroke_path(polyline(&[(9.0, 22.5), (14.0, 8.5), (19.0, 22.5)], false), p.c, w);
+            p.stroke_path(polyline(&[(11.0, 17.5), (17.0, 17.5)], false), p.c, w);
+            p.stroke_path(polyline(&[(20.0, 8.5), (25.0, 22.5)], false), p.c, w);
         }
     }
 }

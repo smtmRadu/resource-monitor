@@ -67,7 +67,7 @@ fn synth(game: bool) -> Snapshot {
         ],
         net_down: 12.3,
         net_up: 1.4,
-        stock: None,
+        stock: Default::default(),
     }
 }
 
@@ -79,23 +79,33 @@ pub fn run(dir: &str) {
     let mut ui = Ui::new(info.clone(), 1.0, true, Group::System);
 
     // Stock group: 60 synthetic polls (random walk), market open (up) and closed (down).
-    let mut st = Ui::new(info, 1.0, true, Group::Stock);
+    let mut st = Ui::new(info.clone(), 1.0, true, Group::Stock(0));
     let mut price = 180.0f64;
     for seq in 1..=61u64 {
         price += ((seq * 7919 % 13) as f64 - 5.5) * 0.03;
-        st.apply(&Snapshot { stock: Some(Quote { price, prev_close: 178.0, session: Session::Open, seq }), ..synth(false) });
+        st.apply(&Snapshot { stock: [Some(Quote { price, prev_close: 178.0, session: Session::Open, seq }), None], ..synth(false) });
     }
     st.step(0.6);
     save(&mut st, dir, "stock_up", &mut report);
-    st.apply(&Snapshot { stock: Some(Quote { price, prev_close: 176.0, session: Session::Pre, seq: 98 }), ..synth(false) });
+    st.apply(&Snapshot { stock: [Some(Quote { price, prev_close: 176.0, session: Session::Pre, seq: 98 }), None], ..synth(false) });
     st.base();
     st.step(0.6);
     save(&mut st, dir, "stock_pre", &mut report);
-    st.apply(&Snapshot { stock: Some(Quote { price, prev_close: 186.0, session: Session::Closed, seq: 99 }), ..synth(true) });
+    st.apply(&Snapshot { stock: [Some(Quote { price, prev_close: 186.0, session: Session::Closed, seq: 99 }), None], ..synth(true) });
     st.base(); // starts the values crossfade
     st.step(0.6); // ... and runs it to the end
     save(&mut st, dir, "stock_down_closed_game", &mut report);
     let _ = writeln!(report, "stock visible top/bottom {}/{}", st.visible_top(), st.visible_bottom());
+    // ANT group (index 1): same snapshots carry both quotes; it reads only its own.
+    let mut ant = Ui::new(info, 1.0, true, Group::Stock(1));
+    let mut ap = 88.9f64;
+    for seq in 1..=61u64 {
+        ap -= ((seq * 6007 % 11) as f64 - 4.5) * 0.02;
+        let nv = Quote { price: 180.0, prev_close: 178.0, session: Session::Open, seq };
+        ant.apply(&Snapshot { stock: [Some(nv), Some(Quote { price: ap, prev_close: 88.91, session: Session::Open, seq })], ..synth(false) });
+    }
+    ant.step(0.6);
+    save(&mut ant, dir, "stock_ant", &mut report);
 
     // Live metrics through the real sampler (no window to notify).
     metrics::start(HWND(std::ptr::null_mut()), 0);
