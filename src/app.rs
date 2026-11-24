@@ -345,20 +345,21 @@ impl App {
 
     /// Dock the stock group to the bottom of the work area (the screen bottom while a
     /// fullscreen game covers the taskbar), with the same visible gap as the system
-    /// column's top: its ribbon ends `off + pill inset` above the taskbar. The groups sit
-    /// side by side from the system column's left edge, `off` apart. True if one moved.
+    /// column's top: its ribbon ends `off + pill inset` above the taskbar. The groups stack
+    /// upward like the system rows: NVDA at the bottom, ANT right above it. True if one moved.
     fn place_stock(&mut self) -> bool {
         let off = (10 * self.dpi / 96) as i32;
         let game = self.stocks.first().is_some_and(|p| p.ui.game_mode());
         let floor = if game && foreground_covers(self.monitor) { self.monitor.bottom } else { work_area(self.monitor).bottom };
         let gap = off + self.ui.visible_top();
-        let mut x = self.origin.x;
+        let mut y = None;
         let mut moved = false;
         for p in &mut self.stocks {
-            let at = POINT { x, y: floor - gap - p.ui.visible_bottom() };
+            let top = y.unwrap_or(floor - gap - p.ui.visible_bottom());
+            let at = POINT { x: self.origin.x, y: top };
             moved |= at != p.origin;
             p.origin = at;
-            x += p.ui.size().0 as i32 + off;
+            y = Some(top - p.ui.size().1 as i32); // one row pitch higher (row + ribbon + spacing)
         }
         moved
     }

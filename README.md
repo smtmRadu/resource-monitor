@@ -58,7 +58,7 @@ until it exits. In **game mode** the pill backgrounds fade to 25% and text gets
 a dark halo, so the overlay stays readable without hiding the game.
 
 **Stocks (optional, off by default):** tray **Stocks** adds an NVDA row and an
-ANT (Anthropic) row beside it, docked at the bottom of the display, right above
+ANT (Anthropic) row above it, docked at the bottom of the display, right above
 the taskbar (the screen bottom while a fullscreen game hides the taskbar). One
 request every poll fetches both quotes. Each pill shows the price, the day
 change and `today` / `pre-mkt` / `closed`. The snake length is the day change

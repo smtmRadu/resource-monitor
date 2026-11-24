@@ -300,11 +300,11 @@ pub fn icon(pix: &mut PixmapMut, g: Glyph, tx: f32, ty: f32, s: f32, c: Color) {
             }
         }
         Glyph::Ant => {
-            // Anthropic's A-backslash mark: an A (legs + crossbar) and a parallel backslash, 17x14 grid px.
-            let w = 1.6;
-            p.stroke_path(polyline(&[(9.0, 22.5), (14.0, 8.5), (19.0, 22.5)], false), p.c, w);
-            p.stroke_path(polyline(&[(11.0, 17.5), (17.0, 17.5)], false), p.c, w);
-            p.stroke_path(polyline(&[(20.0, 8.5), (25.0, 22.5)], false), p.c, w);
+            // Anthropic's A-backslash mark: an A (legs + crossbar) and a parallel backslash, 13x11 grid px.
+            let w = 1.4;
+            p.stroke_path(polyline(&[(10.5, 21.0), (14.5, 10.0), (18.5, 21.0)], false), p.c, w);
+            p.stroke_path(polyline(&[(12.0, 17.0), (17.0, 17.0)], false), p.c, w);
+            p.stroke_path(polyline(&[(19.5, 10.0), (23.5, 21.0)], false), p.c, w);
         }
     }
 }
