@@ -42,14 +42,15 @@ const LOW_SPACE_USED: f32 = 0.90;
 const BG_NORMAL: f32 = 1.0;
 const BG_GAME: f32 = 0.25; // pill backgrounds fade in game mode; text stays solid
 
-const ROWS: [Glyph; 10] = [Glyph::Cpu, Glyph::Ram, Glyph::Gpu, Glyph::Vram, Glyph::Igpu, Glyph::Disk, Glyph::Net, Glyph::Fps, Glyph::Nvda, Glyph::Ant];
+const ROWS: [Glyph; 11] = [Glyph::Cpu, Glyph::Ram, Glyph::Gpu, Glyph::Vram, Glyph::Igpu, Glyph::Disk, Glyph::Net, Glyph::Fps, Glyph::Nvda, Glyph::Ant, Glyph::Amd];
 /// Stock group k's row (`stock::SYMBOLS` order).
-const STOCK_ROWS: [Glyph; crate::stock::N] = [Glyph::Nvda, Glyph::Ant];
+const STOCK_ROWS: [Glyph; crate::stock::N] = [Glyph::Nvda, Glyph::Ant, Glyph::Amd];
 /// Extra history / snake slot after the rows: ETH upload.
 const UP: usize = ROWS.len();
 const STOCK_UP: u32 = 0x4ade80; // day change >= 0: % text, snake, ribbon line
 const STOCK_GREEN: u32 = 0x76b900; // NVIDIA eye icon
 const STOCK_CLAY: u32 = 0xd97757; // Anthropic mark icon
+const STOCK_AMD: u32 = 0xe5e7eb; // AMD arrow icon (the mark is black / white)
 const STOCK_PRE: u32 = 0xeab308; // pre-market: snake only (RAM yellow)
 /// The stock ribbon scrolls one step per poll while the market trades (stock.rs polls every 10 s).
 const STOCK_SAMPLE_S: f32 = 10.0;
@@ -82,6 +83,7 @@ fn name(g: Glyph) -> &'static str {
         Glyph::Fps => "FPS",
         Glyph::Nvda => "NVDA",
         Glyph::Ant => "ANT",
+        Glyph::Amd => "AMD",
     }
 }
 
@@ -226,22 +228,22 @@ pub struct Ui {
     stock_hist: VecDeque<f64>,
     /// Width of the stock ribbon's left price axis (px), set by each static render.
     stock_gut: f32,
-    accent: [u32; 10],
+    accent: [u32; 11],
     text: Text,
     game_mode: bool,
     igpu_shown: bool,
     igpu_zero: u32,
     fps_shown: bool,
     v: Values,
-    hist: [VecDeque<f32>; 11], // ROWS order + net upload at UP
-    snakes: [Snake; 11], // ROWS order + net upload at UP
+    hist: [VecDeque<f32>; 12], // ROWS order + net upload at UP
+    snakes: [Snake; 12], // ROWS order + net upload at UP
     cpu_name: String,
     gpu_name: String,
     igpu_name: String,
     /// DISK snake full length at this transfer speed (MB/s); log2(1 + MB/s) scale.
     disk_max_mbs: f32,
     /// Per row: 0 = collapsed, 1 = fully shown; eases toward `visible` (linear progress).
-    open: [f32; 10],
+    open: [f32; 11],
     icon_boxes: Vec<(usize, BoxF)>,
     /// Everything but the ribbon lines; re-rendered only when dirty.
     stat: Pixmap,
@@ -302,7 +304,7 @@ impl Ui {
             stock_seq: 0,
             stock_hist: VecDeque::new(),
             stock_gut: 0.0,
-            accent: [cpu_acc, 0xeab308, gpu_acc, 0xc084fc, igpu_acc, 0x94a3b8, 0x7dd3fc, 0xfacc15, STOCK_GREEN, STOCK_CLAY],
+            accent: [cpu_acc, 0xeab308, gpu_acc, 0xc084fc, igpu_acc, 0x94a3b8, 0x7dd3fc, 0xfacc15, STOCK_GREEN, STOCK_CLAY, STOCK_AMD],
             text: Text::new(),
             game_mode: false,
             igpu_shown: false,
@@ -335,7 +337,7 @@ impl Ui {
                 stock_tags: Default::default(),
             },
             hist: Default::default(),
-            snakes: [Snake::default(); 11],
+            snakes: [Snake::default(); 12],
             cpu_name: info.cpu_name.clone(),
             gpu_name: info.gpu_name.clone(),
             igpu_name: info.igpu_name.clone(),
@@ -343,7 +345,7 @@ impl Ui {
             // System: iGPU and FPS start hidden. Stock group k: only its symbol's row.
             open: match group {
                 Group::Stock(k) => ROWS.map(|g| if g == STOCK_ROWS[k] { 1.0 } else { 0.0 }),
-                Group::System => [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                Group::System => [1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0],
             },
             icon_boxes: Vec::new(),
             stat: Pixmap::new(1, 1).unwrap(),
@@ -893,7 +895,7 @@ impl Ui {
                 self.gauge_slot(pix, vb, 1);
             }
             Glyph::Net => self.eth(pix, vb),
-            Glyph::Nvda | Glyph::Ant => {
+            Glyph::Nvda | Glyph::Ant | Glyph::Amd => {
                 // "$182.40 +1.31% today": price, colored day change, gray reference word.
                 let (p, c, w) = (self.v.stock_price.clone(), self.v.stock_chg.clone(), self.v.stock_word);
                 self.label(pix, fm, &p, tx, ty, TXT, Anchor::West);

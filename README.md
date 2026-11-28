@@ -57,10 +57,10 @@ or when a known game exe runs. A detected game stays the game while unfocused,
 until it exits. In **game mode** the pill backgrounds fade to 25% and text gets
 a dark halo, so the overlay stays readable without hiding the game.
 
-**Stocks (optional, off by default):** tray **Stocks** adds an NVDA row and an
-ANT (Anthropic) row above it, docked at the bottom of the display, right above
-the taskbar (the screen bottom while a fullscreen game hides the taskbar). One
-request every poll fetches both quotes. Each pill shows the price, the day
+**Stocks (optional, off by default):** tray **Stocks** adds an AMD row, an NVDA
+row above it and an ANT (Anthropic) row on top, docked at the bottom of the
+display, right above the taskbar (the screen bottom while a fullscreen game hides
+the taskbar). One request every poll fetches all three quotes. Each pill shows the price, the day
 change and `today` / `pre-mkt` / `closed`. The snake length is the day change
 (+31% = 31% of the pill), green when up and red when down; in pre-market (4:00–9:30
 New York time) the snake is yellow. The ribbon covers the last ~10 min, with
@@ -83,7 +83,7 @@ The window is click-through, so everything lives in the **tray icon**
   start right of it)
 - **Size** – 0.75x / 1x (default) / 1.25x
 - **Display** – which monitor it docks on (only with 2+ displays)
-- **Stocks** – stock rows (NVDA, ANT) on/off, all together (off by default; it polls the internet)
+- **Stocks** – stock rows (ANT, NVDA, AMD) on/off, all together (off by default; it polls the internet)
 - **Quit**
 
 Choices persist in `%LOCALAPPDATA%\ResourceMonitor\settings.json` (dev builds:
@@ -150,7 +150,7 @@ are needed except where noted.
 | Network MB/s | `GetIfEntry2` on physical NICs only | no |
 | Game detection | foreground window covering its monitor or using the 3D engine (PDH `GPU Engine`, per process), or a known game exe | no |
 | FPS | PresentMon child process (`vendor/PresentMon`), game's main swap chain | **yes** |
-| NVDA + ANT prices (Stocks on) | Yahoo Finance quote API (free, no key; session cookie + crumb): one request for both symbols, with pre-market prices, every 10 s in pre-market and the session, every 5 min otherwise | no |
+| NVDA + ANT + AMD prices (Stocks on) | Yahoo Finance quote API (free, no key; session cookie + crumb): one request for all symbols, with pre-market prices, every 10 s in pre-market and the session, every 5 min otherwise | no |
 | Exact CPU sensors (Tctl / package) | LibreHardwareMonitor via `vendor/lhm_bridge.ps1`; preferred when available | **yes** (or LHM app running) |
 
 Helper processes run in a kill-on-close job object, so they never outlive the
@@ -185,6 +185,6 @@ How it stays light:
 - **Stocks** on (v0.3.8, 2 × 75 s, market open): +0.8 points of one core
   (mostly its 30 fps ribbon scroll), +2 MB private, +1 thread, ~11 MB of data per
   trading day (~2.5 KB every 10 s). Since v0.3.9 one ~1.6 KB reply carries both
-  NVDA and ANT. Off: no requests, nothing drawn.
+  NVDA and ANT; since v0.3.11 AMD too. Off: no requests, nothing drawn.
 - The update check is one ~13 KB request per hour. Installed files are hashed
   once, then cached by size and modified time.

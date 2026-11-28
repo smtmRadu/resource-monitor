@@ -346,7 +346,8 @@ impl App {
     /// Dock the stock group to the bottom of the work area (the screen bottom while a
     /// fullscreen game covers the taskbar), with the same visible gap as the system
     /// column's top: its ribbon ends `off + pill inset` above the taskbar. The groups stack
-    /// upward like the system rows: NVDA at the bottom, ANT right above it. True if one moved.
+    /// upward like the system rows, in `stock::STACK` order: AMD at the bottom, NVDA above it,
+    /// ANT on top. True if one moved.
     fn place_stock(&mut self) -> bool {
         let off = (10 * self.dpi / 96) as i32;
         let game = self.stocks.first().is_some_and(|p| p.ui.game_mode());
@@ -354,7 +355,8 @@ impl App {
         let gap = off + self.ui.visible_top();
         let mut y = None;
         let mut moved = false;
-        for p in &mut self.stocks {
+        for &k in &crate::stock::STACK {
+            let p = &mut self.stocks[k];
             let top = y.unwrap_or(floor - gap - p.ui.visible_bottom());
             let at = POINT { x: self.origin.x, y: top };
             moved |= at != p.origin;

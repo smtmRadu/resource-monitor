@@ -112,9 +112,15 @@ pub enum Glyph {
     Fps,
     /// NVDA stock row (its own window, docked above the taskbar).
     Nvda,
-    /// ANT stock row (its own window, right of the NVDA one).
+    /// ANT stock row (its own window, above the NVDA one).
     Ant,
+    /// AMD stock row (its own window, under the NVDA one).
+    Amd,
 }
+
+/// AMD's arrow mark (simple-icons "amd", its arrow part), scaled to 0..100: the L band with the cut corner and the
+/// small inner arrow.
+const AMD_ARROW: &str = "M0,0 L27.5,27.5 L72.5,27.5 L72.5,72.5 L100,100 L100,0 Z M27.4,33 L0,61.2 L0,100 L38.7,100 L67,72.6 L27.4,72.6 Z";
 
 /// NVIDIA's eye mark: the real logo outline (Wikimedia Commons "NVIDIA logo.svg", path21),
 /// in its own units (x 56.8..305.7, y 31.5..196.2).
@@ -305,6 +311,15 @@ pub fn icon(pix: &mut PixmapMut, g: Glyph, tx: f32, ty: f32, s: f32, c: Color) {
             p.stroke_path(polyline(&[(10.5, 21.0), (14.5, 10.0), (18.5, 21.0)], false), p.c, w);
             p.stroke_path(polyline(&[(12.0, 17.0), (17.0, 17.0)], false), p.c, w);
             p.stroke_path(polyline(&[(19.5, 10.0), (23.5, 21.0)], false), p.c, w);
+        }
+        Glyph::Amd => {
+            // The arrow mark, 12x12 grid px centered on the icon box, as a thin outline (like the eye).
+            if let Some(arrow) = svg_path(AMD_ARROW) {
+                let fit = Transform::from_translate(17.0, 15.5).pre_scale(0.12, 0.12).pre_translate(-50.0, -50.0);
+                if let Some(path) = arrow.transform(p.ts.pre_concat(fit)) {
+                    p.pix.stroke_path(&path, &paint(p.c), &stroke(0.7 * s, LineCap::Butt), Transform::identity(), None);
+                }
+            }
         }
     }
 }

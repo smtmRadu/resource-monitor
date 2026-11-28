@@ -1,4 +1,4 @@
-//! Stock quote poller (NVDA, ANT): one background thread, one Yahoo quote request for all symbols.
+//! Stock quote poller (NVDA, ANT, AMD): one background thread, one Yahoo quote request for all symbols.
 //!
 //! Yahoo's v7 quote API (free, no key) needs a session cookie plus a "crumb": the poller
 //! gets both once (fc.yahoo.com sets the A3 cookie, /v1/test/getcrumb returns the crumb)
@@ -6,7 +6,7 @@
 //! Every 10 s while the US market trades (pre-market + regular session), every
 //! 5 min otherwise; a failed request retries after 30 s and keeps the last quotes.
 //! Off (tray Stocks unchecked, the default) the thread idles: no requests.
-//! One request returns both symbols (~1.5 KB + headers), so 10 s polling over the
+//! One request returns every symbol (~1.5 KB + headers), so 10 s polling over the
 //! 12 h of pre-market + session costs ~10 MB per trading day. The sampler copies the
 //! latest quotes into each snapshot, so a slow request never stalls the 1 Hz metrics.
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,9 +19,11 @@ use windows::Win32::Networking::WinInet::*;
 
 use crate::log::log;
 
-/// Polled symbols; index k = stock group k (NVDA docks left, ANT right of it).
-pub const SYMBOLS: [&str; 2] = ["NVDA", "ANT"];
+/// Polled symbols; index k = stock group k.
+pub const SYMBOLS: [&str; 3] = ["NVDA", "ANT", "AMD"];
 pub const N: usize = SYMBOLS.len();
+/// The groups from the bottom up (user 2026-11-28: AMD under NVIDIA): AMD above the taskbar, NVDA, then ANT on top.
+pub const STACK: [usize; N] = [2, 0, 1];
 
 const COOKIE_URL: &str = "https://fc.yahoo.com";
 const CRUMB_URL: &str = "https://query1.finance.yahoo.com/v1/test/getcrumb";
@@ -65,7 +67,7 @@ impl Quote {
 
 pub type Quotes = [Option<Quote>; N];
 
-static LATEST: Mutex<Quotes> = Mutex::new([None, None]);
+static LATEST: Mutex<Quotes> = Mutex::new([const { None }; N]);
 static STOP: AtomicBool = AtomicBool::new(false);
 static ENABLED: AtomicBool = AtomicBool::new(false);
 
